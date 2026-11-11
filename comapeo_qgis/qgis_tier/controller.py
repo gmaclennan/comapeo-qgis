@@ -537,7 +537,10 @@ class Controller(QObject):
             # Only what the app says: a dropped connection usually comes back.
             if hook is not None and live is not None and live.editable is not True:
                 hook.editing_lost(message)
-            return
+            # Locking columns mid-session would strand the user's edits; the save
+            # is refused instead. A rebuild still needs its columns unlocked.
+            if not allowed:
+                return
         if not force and self._edit_keys.get(layer.id()) == key:
             return
         self._edit_keys[layer.id()] = key
