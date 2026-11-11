@@ -43,6 +43,7 @@ class AudioPlayer(QObject):
         self._module = _multimedia()
         self._player: Any = None
         self._output: Any = None
+        self._states: Any = None
         self._watchdog = QTimer(self)
         self._watchdog.setSingleShot(True)
         self._watchdog.timeout.connect(self._on_stall)
@@ -56,12 +57,15 @@ class AudioPlayer(QObject):
             return self._player
         m = self._module
         player = m.QMediaPlayer(self)
-        if hasattr(m, "QAudioOutput"):
+        # Qt5 also has a QAudioOutput, a raw PCM sink unrelated to QMediaPlayer.
+        if hasattr(player, "setAudioOutput"):
+            self._states = m.QMediaPlayer.PlaybackState
             self._output = m.QAudioOutput(self)
             player.setAudioOutput(self._output)
             player.playbackStateChanged.connect(self._on_state)
             player.errorOccurred.connect(lambda *_a: self._on_error())
         else:
+            self._states = m.QMediaPlayer.State
             player.stateChanged.connect(self._on_state)
             # PyQt5 exposes the Qt5 error signal under the method's name.
             player.error.connect(lambda *_a: self._on_error())
@@ -120,10 +124,9 @@ class AudioPlayer(QObject):
         return getattr(status, "name", str(status))
 
     def _on_state(self, state: Any) -> None:
-        name = getattr(state, "name", str(state))
-        if "Playing" in name:
+        if state == self._states.PlayingState:
             value = PLAYING
-        elif "Paused" in name:
+        elif state == self._states.PausedState:
             value = PAUSED
         else:
             value = STOPPED
