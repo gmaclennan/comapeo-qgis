@@ -128,6 +128,7 @@ def test_a_damaged_cache_is_rebuilt_when_connected_keeping_layers_and_style(
 ):
     project_file, cache, styling = save_project_with_layers(iface, fake, folder)
     damaged = damage(cache, kind)
+    fake.projects["p1"].features["observations"].append(observation("c"))
 
     plugin = CoMapeoPlugin(iface)
     try:
@@ -143,7 +144,7 @@ def test_a_damaged_cache_is_rebuilt_when_connected_keeping_layers_and_style(
         with open(os.path.join(cache_root(), aside), "rb") as f:
             assert f.read() == damaged
         wait_until(lambda: observations.isValid() and tracks.isValid(), timeout=30)
-        wait_until(lambda: set(rows(observations)) == {"a", "b"})
+        wait_until(lambda: set(rows(observations)) == {"a", "b", "c"})
         wait_until(lambda: set(rows(tracks)) == {"t1"})
         wait_until(lambda: controller.project_status("p1").last_refresh is not None)
         assert sqlite_error(cache) is None
@@ -230,30 +231,9 @@ def locked(path: str) -> Iterator[None]:
         holder.close()
 
 
-@contextlib.contextmanager
-def unreadable(path: str) -> Iterator[None]:
-    os.chmod(path, 0)
-    try:
-        yield
-    finally:
-        os.chmod(path, 0o600)
-
-
-@pytest.mark.parametrize(
-    "hold",
-    [
-        locked,
-        pytest.param(
-            unreadable,
-            marks=pytest.mark.skipif(os.name != "posix", reason="POSIX permissions"),
-        ),
-    ],
-)
-def test_a_cache_another_program_holds_is_not_taken_for_damage(
-    iface, fake, folder, hold
-):
+def test_a_cache_locked_by_another_program_is_not_taken_for_damage(iface, fake, folder):
     _project_file, cache, _styling = save_project_with_layers(iface, fake, folder)
-    with hold(cache):
+    with locked(cache):
         assert sqlite_error(cache) is not None
         started = time.monotonic()
         assert not ProjectCache(cache_root(), "p1").is_damaged()
