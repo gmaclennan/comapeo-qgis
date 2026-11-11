@@ -293,9 +293,10 @@ def test_a_poll_does_not_wait_on_a_cache_another_program_locks(
             assert QgsProject.instance().read(project_file)
             controller = plugin.controller
             wait_until(lambda: controller.connected, message="connected")
+            # The sync has met the lock: the first listing's writes are behind us.
             wait_until(
-                lambda: "another program" in panel_text(plugin).lower(),
-                message="the lock reported",
+                lambda: controller.project_status("p1").error is not None,
+                message="the lock reported by the sync",
             )
             pump(300)
             stalls = Stalls()
