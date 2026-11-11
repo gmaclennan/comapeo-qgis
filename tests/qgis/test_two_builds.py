@@ -166,3 +166,39 @@ def test_extra_locations_from_the_environment_are_searched(
     plugin.initGui()
     wait_until(lambda: plugin.controller.available_layers("p9"))
     assert browser_messages() == ["CoMapeo Desktop Dev"]
+
+
+def dev_statuses(controller) -> list:
+    return [
+        s for s in controller.server_statuses if s.app_name == "CoMapeo Desktop Dev"
+    ]
+
+
+def test_removing_an_extra_location_disconnects_its_build(
+    plugin, dev_build, servers, monkeypatch
+):
+    dev, data = dev_build
+    answers = [f"{data}\n", "", f"{data}{os.sep}\n{data}\n"]
+    monkeypatch.setattr(
+        QInputDialog,
+        "getMultiLineText",
+        lambda *_args: (answers.pop(0), True),
+    )
+    plugin.initGui()
+    controller = plugin.controller
+    plugin.dock.locations_button.click()
+    wait_until(lambda: controller.available_layers("p9"), message="dev build found")
+    assert dev.open_connections == 1
+
+    plugin.dock.locations_button.click()
+    wait_until(lambda: dev.open_connections == 0, message="dev build let go")
+    wait_until(lambda: not dev_statuses(controller))
+    assert "CoMapeo Desktop Dev" not in browser_messages()
+    assert "CoMapeo Desktop Dev" not in plugin.dock.status_label.text()
+
+    plugin.dock.locations_button.click()
+    wait_until(lambda: controller.available_layers("p9"), message="found again")
+    pump(500)
+    assert dev.open_connections == 1
+    assert len(dev_statuses(controller)) == 1
+    assert browser_messages().count("CoMapeo Desktop Dev") == 1

@@ -15,6 +15,7 @@ from ..core.discovery import (
     EXTRA_PREFIX,
     DiscoveryInfo,
     DiscoveryResult,
+    candidate_paths,
     find_servers,
 )
 from ..core.protocol import (
@@ -144,7 +145,11 @@ class Connector(QObject):
         if not self._running:
             return
         try:
-            results = find_servers(override=self._override(), extra=self._extra())
+            override, extra = self._override(), self._extra()
+            configured = {
+                c.build_type for c in candidate_paths(override=override, extra=extra)
+            }
+            results = find_servers(override=override, extra=extra)
         except Exception as err:  # never let a bad file stop the plugin
             results = []
             self._statuses = {
@@ -158,6 +163,8 @@ class Connector(QObject):
             self.statusChanged.emit()
             self._schedule(failed=True)
             return
+        for build_type in [b for b in self._clients if b not in configured]:
+            self._forget(build_type)
         seen = set()
         failed = False
         for result in results:
@@ -168,6 +175,13 @@ class Connector(QObject):
                 del self._statuses[build_type]
         self.statusChanged.emit()
         self._schedule(failed=failed or not results)
+
+    def _forget(self, build_type: str) -> None:
+        """Let go of a build whose location is no longer looked in."""
+        client = self._clients.pop(build_type)
+        self._statuses.pop(build_type, None)
+        self._mismatched.pop(build_type, None)
+        client.close()
 
     def _consider(self, result: DiscoveryResult) -> bool:
         """Returns True when this build type still needs another attempt."""
