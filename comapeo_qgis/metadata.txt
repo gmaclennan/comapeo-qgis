@@ -3,7 +3,7 @@ name=CoMapeo
 qgisMinimumVersion=3.40
 qgisMaximumVersion=4.99
 description=Show the observations and tracks of a CoMapeo project as QGIS layers
-about=Connects to CoMapeo Desktop running on the same computer and shows a project's observations and tracks as layers, with category icons, photos and audio. Requires CoMapeo Desktop with QGIS access switched on in its settings. Licensed under GPL-2.0-or-later.
+about=Connects to CoMapeo Desktop running on the same computer and shows a project's observations and tracks as read-only layers with category icons, kept in a local cache so they still show when the app is closed. Selecting an observation shows its photos and audio in the CoMapeo panel. Requires CoMapeo Desktop with QGIS access switched on in its settings. Licensed under GPL-2.0-or-later.
 version=0.1.0
 author=Awana Digital
 # TODO: set the contact email, repository and tracker before the first upload.
