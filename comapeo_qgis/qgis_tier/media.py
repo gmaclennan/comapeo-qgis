@@ -23,7 +23,7 @@ from ..core.media import (
     classify_status,
     is_media_url,
 )
-from ..core.model import Attachment, parse_attachments
+from ..core.model import MEDIA_VARIANTS, Attachment, parse_attachments
 
 TRANSFER_TIMEOUT_MS = 60_000
 MAX_PARALLEL = 4
@@ -86,12 +86,13 @@ class MediaFetcher(QObject):
         }
 
     def fetch(self, project_id: str, attachment: Attachment, variant: str) -> bool:
-        """Start a download unless one is running; False if there is no URL to use."""
+        """Start a download unless one is running; False if there is no URL to use
+        or the variant is not one the cache knows."""
         key = (project_id, attachment.key, variant)
         if key in self._jobs:
             return True
         url = attachment.urls.get(variant)
-        if not is_media_url(url):
+        if variant not in MEDIA_VARIANTS or not is_media_url(url):
             return False
         request = QNetworkRequest(QUrl(url))
         request.setAttribute(

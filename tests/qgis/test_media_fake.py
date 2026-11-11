@@ -7,6 +7,7 @@ import pytest
 from qgis.PyQt.QtCore import QBuffer, QByteArray, QIODevice, Qt
 from qgis.PyQt.QtGui import QColor, QImage
 
+from comapeo_qgis.core.model import Attachment
 from comapeo_qgis.plugin import CoMapeoPlugin
 from tests.fake_server import FakeProject, FakeServer, observation
 from tests.media_server import MediaServer
@@ -338,3 +339,34 @@ def test_the_larger_view_has_room_in_a_shown_window(plugin, fake, http, iface):
         wait_until(lambda: panel.preview.height() >= height, message="room")
     finally:
         window.hide()
+
+
+def test_an_unknown_media_variant_is_never_fetched(plugin, fake, http):
+    start(plugin, fake, [observation("a")])
+    fetcher = plugin.controller.fetcher
+    http.serve("/blobs/odd/huge", jpeg("#ff0000"), "image/jpeg")
+    odd = Attachment(
+        "photo", "odd", "drive/photo/odd", {"huge": http.url("/blobs/odd/huge")}
+    )
+    assert not fetcher.fetch("p1", odd, "huge")
+    pump(300)
+    assert not fetcher.is_fetching("p1", odd.key, "huge")
+    assert "/blobs/odd/huge" not in http.requests
+    assert media_files() == []
+
+
+def test_download_all_media_skips_a_variant_it_does_not_know(plugin, fake, http):
+    a = observation("a")
+    attachment = photo(http, "odd", "#ff0000")
+    http.serve("/blobs/odd/huge", jpeg("#ff0000"), "image/jpeg")
+    attachment["urls"]["huge"] = http.url("/blobs/odd/huge")
+    a["attachments"] = [attachment]
+    start(plugin, fake, [a])
+    dock = plugin.dock
+    dock.projects.topLevelItem(0).setSelected(True)
+    dock.download_button.click()
+    wait_until(lambda: dock.cancel_download_button.isHidden(), message="finished")
+    assert dock.download_message.text().startswith("Media files: 3 downloaded")
+    assert "/blobs/odd/huge" not in http.requests
+    assert len(media_files()) == 3
+    assert not any(p.name.startswith(".part-") for p in media_files())

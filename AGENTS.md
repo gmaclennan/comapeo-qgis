@@ -70,7 +70,7 @@ scripts/smoke_e2e.py   drives the real-window smoke check; smoke_in_qgis.py runs
 - Unix socket paths must stay under about 100 bytes: tests use `tests.fake_server.short_tempdir()`, not pytest's `tmp_path`.
 - Cache downloaded media by attachment key and variant, never by URL; the media server port changes every launch. The attachment lists stored in the cache rows keep the URLs from when the row was written: never fetch from them. When the app is connected, ask it again (`layers.getFeatures` with `ids`) for current URLs.
 - Every asynchronous media result in the panel is checked against the selection it was started for (a generation counter); a late reply must never show under a newer selection.
-- Only `http` URLs on a loopback host are fetched (`core.media.is_media_url`), with no proxy and no redirects.
+- Only `http` URLs on a loopback host are fetched (`core.media.is_media_url`), with no proxy and no redirects. Attachments keep URLs only for the variants the media cache knows (`core.model.MEDIA_VARIANTS`: thumbnail, preview, original), dropped when parsed, and `MediaFetcher.fetch` refuses any other.
 - Comments only for a non-obvious why, one line.
 - QGIS tests wait with `wait_until` (runs the Qt event loop), never `time.sleep`. They compare QGIS layers with what the server serves over a second connection (`tests/qgis/helpers.Oracle`), not with the plugin's own state. Tests never touch the real QGIS profile (conftest asserts it) and point discovery at an empty folder unless they start a server.
 
