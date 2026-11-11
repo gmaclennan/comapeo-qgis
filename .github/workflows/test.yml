@@ -40,11 +40,9 @@ jobs:
         python: ['3.9', '3.12']
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
-        with:
-          python-version: ${{ matrix.python }}
-      - run: python -m pip install 'pytest>=8'
-      - run: python -m pytest -rs -m "not real_server"
+      # setup-python has no 3.9 for the newest runner images; uv fetches one.
+      - uses: astral-sh/setup-uv@v10
+      - run: uv run --no-project --python ${{ matrix.python }} --with 'pytest>=8' python -m pytest -rs -m "not real_server"
 
   real-server:
     name: real server / ${{ matrix.os }}
@@ -113,7 +111,7 @@ jobs:
       - name: Install pytest beside QGIS's Python
         run: |
           python3 -m pip install --quiet --target /opt/test-deps 'pytest>=8'
-          echo "PYTHONPATH=/opt/test-deps" >> "$GITHUB_ENV"
+          echo "PYTHONPATH=/opt/test-deps${PYTHONPATH:+:$PYTHONPATH}" >> "$GITHUB_ENV"
           echo "COMAPEO_LOCAL_API_DIR=$GITHUB_WORKSPACE/comapeo-local-api" >> "$GITHUB_ENV"
       - run: python3 -c "from qgis.core import Qgis; print(Qgis.QGIS_VERSION)"
       - run: python3 -m pytest -rs
@@ -181,11 +179,11 @@ jobs:
       - name: Install pytest beside QGIS's Python
         shell: pwsh
         run: |
-          & "C:\OSGeo4W\bin\${{ matrix.python }}" -m pip install --quiet --target C:\test-deps 'pytest>=8'
+          # OSGeo4W's environment script resets PATH and PYTHONPATH, so pytest goes
+          # into its own Python and Node is named explicitly.
+          & "C:\OSGeo4W\bin\${{ matrix.python }}" -m pip install --quiet --disable-pip-version-check 'pytest>=8'
           if ($LASTEXITCODE -ne 0) { throw 'pip failed' }
-          # OSGeo4W's environment script resets PATH, so name Node explicitly.
           "COMAPEO_NODE=$((Get-Command node).Source)" >> $env:GITHUB_ENV
-          "PYTHONPATH=C:\test-deps" >> $env:GITHUB_ENV
           "COMAPEO_LOCAL_API_DIR=$env:GITHUB_WORKSPACE\comapeo-local-api" >> $env:GITHUB_ENV
       - shell: cmd
         run: C:\OSGeo4W\bin\${{ matrix.python }} -c "from qgis.core import Qgis; print(Qgis.QGIS_VERSION)"
