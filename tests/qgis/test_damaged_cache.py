@@ -18,6 +18,8 @@ from qgis.PyQt.QtWidgets import QMessageBox
 
 from comapeo_qgis.plugin import CoMapeoPlugin
 from comapeo_qgis.qgis_tier import cache as cache_module
+from comapeo_qgis.qgis_tier import controller as controller_module
+from comapeo_qgis.qgis_tier import sync as sync_module
 from comapeo_qgis.qgis_tier.cache import ProjectCache
 from tests.fake_server import FakeProject, FakeServer, observation, track
 from tests.qgis.conftest import (
@@ -333,5 +335,31 @@ def test_a_damaged_cache_first_checked_under_a_lock_is_checked_again(
         [observations] = comapeo_map_layers("observations")
         wait_until(lambda: sqlite_error(cache) is None, message="rebuilt")
         wait_until(lambda: set(rows(observations)) == {"a", "b"})
+    finally:
+        plugin.unload()
+
+
+def test_a_damaged_cache_first_checked_under_a_lock_is_set_aside_by_a_poll(
+    iface, fake, folder, monkeypatch
+):
+    monkeypatch.setattr(controller_module, "PROJECT_POLL_MS", 200)
+    # Only the poll, not the sync's own retry, may meet the file once it is free.
+    monkeypatch.setattr(sync_module, "LOCK_RETRY_MS", 60_000)
+    project_file, cache, _styling = save_project_with_layers(iface, fake, folder)
+    damage(cache, "no comapeo_meta")
+    plugin = CoMapeoPlugin(iface)
+    try:
+        with held_lock(cache):
+            plugin.initGui()
+            assert QgsProject.instance().read(project_file)
+            controller = plugin.controller
+            wait_until(lambda: controller.connected, message="connected")
+            pump(300)
+            assert moved_aside() == []
+        if os.name == "nt":
+            # Windows will not rename an open file; there it is repaired in place.
+            return
+        # Set aside before the poll writes metadata into it, which would hide it.
+        wait_until(moved_aside, message="damaged cache set aside")
     finally:
         plugin.unload()
