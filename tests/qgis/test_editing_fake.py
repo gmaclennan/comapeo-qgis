@@ -819,3 +819,26 @@ def test_role_removed_while_the_large_save_question_is_open(
     )
     assert fake.edits() == []
     wait_until(lambda: len(layer.editBuffer().changedAttributeValues()) == 3)
+
+
+def test_a_fault_in_the_plugin_before_sending_keeps_the_edits(
+    fake, plugin, iface, monkeypatch
+):
+    layer = open_layer(fake, plugin)
+
+    def broken(*_args):
+        raise RuntimeError("a fault in the plugin")
+
+    monkeypatch.setattr(editing, "discard_messages", broken)
+    assert layer.startEditing()
+    change(layer, "o1", "notes", "typed")
+    assert layer.deleteFeature(fid(layer, "o2"))
+    assert not layer.commitChanges(False)
+    wait_until(
+        lambda: any("a problem in the CoMapeo plugin" in t for t in iface.bar_texts())
+    )
+    stored = {f["id"]: plain(f["notes"]) for f in layer.dataProvider().getFeatures()}
+    assert stored == {d: f"note {d}" for d in DOCS}
+    assert fake.edits() == []
+    wait_until(lambda: len(layer.editBuffer().changedAttributeValues()) == 1)
+    assert "o2" not in rows(layer)

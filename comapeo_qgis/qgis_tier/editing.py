@@ -14,6 +14,7 @@ from __future__ import annotations
 import contextlib
 import json
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -357,9 +358,16 @@ class EditHook(QObject):
         if self._muted or not self.layer.isModified():
             return
         # Raising in this slot does not stop QGIS's commit, which would then
-        # write the buffer to the cache: every failure up to _send must refuse.
+        # write the buffer to the cache: every failure before it is emptied
+        # must refuse.
+        schema_changed = False
         try:
             prepared = self._prepare()
+            if not isinstance(prepared, str):
+                plan, live, schema_changed = prepared
+                labels = {c.name: c.label for c in live.columns}
+                lines = discard_messages(plan.discards, labels)
+                prepared = self._start_save(plan.requests, labels, lines)
         except Exception as err:
             QgsMessageLog.logMessage(
                 f"Could not prepare the edits to save: {err!r}",
@@ -370,9 +378,7 @@ class EditHook(QObject):
         if isinstance(prepared, str):
             self._refuse(prepared)
             return
-        plan, live, schema_changed = prepared
-        labels = {c.name: c.label for c in live.columns}
-        self._send(plan.requests, labels, discard_messages(plan.discards, labels))
+        self._send(*prepared)
         if schema_changed:
             self._tidy_after_schema_change(stop_editing)
 
@@ -576,18 +582,23 @@ class EditHook(QObject):
 
         QTimer.singleShot(0, tidy)
 
-    def _send(
-        self, requests: list[EditRequest], labels: dict[str, str], discards: list[str]
-    ) -> None:
+    def _start_save(
+        self,
+        requests: Sequence[EditRequest],
+        labels: dict[str, str],
+        discards: list[str],
+    ) -> tuple[Any, _Save] | str:
         client = self.controller.client_for(self.project_id)
         if client is None:
-            self._refuse(NOT_CONNECTED_TEXT)
-            return
+            return NOT_CONNECTED_TEXT
         self._count += 1
         key = f"save:{self.layer.id()}:{self._count}"
         save = _Save(list(requests), labels, discards, key)
         # Before emptying the buffer: that releases the edit session's hold.
         self._hold(save.key)
+        return client, save
+
+    def _send(self, client: Any, save: _Save) -> None:
         self._muted += 1
         try:
             self._empty_buffer()
