@@ -409,9 +409,12 @@ def attachments_from_json(text: Any) -> tuple[Attachment, ...]:
     if not isinstance(text, str):
         return ()
     try:
-        items = json.loads(text)
+        return parse_attachments(json.loads(text))
     except ValueError:
         return ()
+
+
+def parse_attachments(items: Any) -> tuple[Attachment, ...]:
     found = (_parse_attachment(item) for item in _list(items))
     return tuple(a for a in found if a is not None)
 
