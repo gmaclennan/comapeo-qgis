@@ -2,7 +2,7 @@
 
 A QGIS plugin that shows the observations and tracks of a CoMapeo project as layers, with category icons, photos and audio. It connects to CoMapeo Desktop running on the same computer through the CoMapeo local API. Version 1 is view-only.
 
-Status: early development. Observations and tracks show as read-only layers with category icons, kept in a local cache and updated live; the photo and audio panel is not built yet. Scope and design are in [docs/PLAN.md](docs/PLAN.md). The wire contract is `docs/PROTOCOL.md` in the `comapeo-local-api` repository.
+Status: early development. Observations and tracks show as read-only layers with category icons, kept in a local cache and updated live. Selecting one observation shows its photos and audio in the CoMapeo panel. Scope and design are in [docs/PLAN.md](docs/PLAN.md). The wire contract is `docs/PROTOCOL.md` in the `comapeo-local-api` repository.
 
 Tested so far on QGIS 4.0 and 4.2 on macOS. QGIS 3.40 and later (Qt5), Windows and Linux are intended but not yet tested.
 
@@ -35,9 +35,13 @@ cd ../comapeo-local-api && fnm exec --using=24 npm run dev -- --discovery-dir /t
 
 Type `create`, `update`, `delete` or `category` into the dev server to see live updates.
 
+`scripts/smoke-e2e.sh --media` checks the photo and audio panel in a real QGIS window the same way, with screenshots prefixed `media-`.
+
 ## How it works
 
 The plugin finds a running app through its discovery file, connects over a local socket and keeps a GeoPackage per CoMapeo project in the QGIS profile folder (`comapeo/cache/`). Map layers read from that file, so they still show the last data fetched when the app is closed; they are then marked with a badge in the Layers panel and in the CoMapeo panel. Layers are styled once, when first added, with one category per CoMapeo category; "Reset to CoMapeo style" in the layer's context menu restores it.
+
+Select one observation on a CoMapeo layer and the CoMapeo panel shows its photos as thumbnails; click one for a larger view, and "Open original" downloads the full-size photo and opens it in the system's image viewer. Audio plays in the panel, with "Open in player" beside it in case it does not play there; video opens in the system's player. Photos that have not synced to this computer yet show a "Not yet synced" placeholder and are tried again when you press Refresh. Thumbnails and larger views are fetched when first shown and kept in `comapeo/media/` in the QGIS profile folder, beside the layer cache; originals are only fetched when opened, or for a whole project with "Download all media". With CoMapeo Desktop closed, the panel shows whatever was saved. "Remove cached data" deletes a project's media as well as its layers. There is no size limit on the media folder yet.
 
 ## Licence
 
