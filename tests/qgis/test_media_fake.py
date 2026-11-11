@@ -16,6 +16,7 @@ from tests.qgis.media_helpers import (
     media_files,
     photo_items,
     select,
+    shown_pixmap,
 )
 
 
@@ -318,3 +319,22 @@ def test_remove_cached_data_leaves_nothing_behind_while_photos_load(
         http.release(f"/blobs/{name}/thumbnail")
     pump(500)
     assert media_files() == []
+
+
+def test_the_larger_view_has_room_in_a_shown_window(plugin, fake, http, iface):
+    a = observation("a")
+    a["attachments"] = [photo(http, "big", "#ff0000")]
+    layer = start(plugin, fake, [a])
+    window = iface.mainWindow()
+    window.resize(1200, 900)
+    window.show()
+    try:
+        panel = plugin.dock.media_area
+        select(layer, ["a"])
+        wait_until(lambda: [i.text() for i in photo_items(panel)] == [""])
+        panel.photos.itemClicked.emit(photo_items(panel)[0])
+        wait_until(lambda: shows_image(panel.preview))
+        height = shown_pixmap(panel.preview).height()
+        wait_until(lambda: panel.preview.height() >= height, message="room")
+    finally:
+        window.hide()

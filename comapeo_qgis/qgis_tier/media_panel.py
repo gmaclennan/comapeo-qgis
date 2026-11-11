@@ -482,6 +482,8 @@ class MediaPanel(QWidget):
         self.open_original_button.show()
         pixmap = self._load_preview(path)
         if state == CACHED and not pixmap.isNull():
+            # A word-wrapped QLabel sizes by its text, which leaves an image no height.
+            self.preview.setWordWrap(False)
             width = max(120, min(PREVIEW_MAX, self.preview.width() - 8))
             height = min(PREVIEW_MAX, 360)
             self.preview.setPixmap(
@@ -501,6 +503,7 @@ class MediaPanel(QWidget):
             "Desktop to see it.",
             MISSING: "There is no larger view of this photo.",
         }
+        self.preview.setWordWrap(True)
         self.preview.setText(texts.get(state, "The larger view could not be loaded."))
 
     # Opening and playing
