@@ -13,7 +13,13 @@ import pytest
 from comapeo_qgis.plugin import CoMapeoPlugin
 from tests.qgis.conftest import server_or_skip, use_discovery, wait_until
 from tests.qgis.helpers import Oracle, rows
-from tests.qgis.media_helpers import buttons, media_files, media_root, photo_items
+from tests.qgis.media_helpers import (
+    buttons,
+    media_files,
+    media_root,
+    photo_items,
+    shown_pixmap,
+)
 from tests.qgis.media_helpers import select as select_docs
 
 pytestmark = pytest.mark.real_server
@@ -109,12 +115,12 @@ def test_photos_show_as_thumbnails_with_a_larger_view_and_the_original(
     assert not [p for p in media_files() if p.name.startswith(("preview", "original"))]
 
     panel.photos.itemClicked.emit(photo_items(panel)[0])
-    wait_until(lambda: not panel.preview.pixmap().isNull())
+    wait_until(lambda: shown_pixmap(panel.preview))
     previews = [p for p in media_files() if p.name.startswith("preview")]
     assert [p.read_bytes() for p in previews] == [
         http_body(photos[0]["urls"]["preview"])
     ]
-    assert panel.preview.pixmap().width() > 96
+    assert shown_pixmap(panel.preview).width() > 96
     assert not [p for p in media_files() if p.name.startswith("original")]
 
     panel.open_original_button.click()
