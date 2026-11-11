@@ -709,7 +709,9 @@ def _unreadable(path: Path) -> bool:
     """Whether SQLite reports the file as no database, a malformed one or one
     without our metadata; a lock, a permission or a disk problem is not damage."""
     try:
-        conn = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)
+        conn = sqlite3.connect(
+            f"{path.resolve().as_uri()}?mode=ro", uri=True, timeout=0
+        )
     except sqlite3.Error:
         return False
     try:

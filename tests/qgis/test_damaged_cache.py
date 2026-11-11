@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
 import shutil
 import sqlite3
 import tempfile
+import time
+from collections.abc import Iterator
 
 import pytest
 from qgis.core import QgsBrowserModel, QgsProject
@@ -13,6 +16,7 @@ from qgis.PyQt.QtCore import QModelIndex
 from qgis.PyQt.QtWidgets import QMessageBox
 
 from comapeo_qgis.plugin import CoMapeoPlugin
+from comapeo_qgis.qgis_tier.cache import ProjectCache
 from tests.fake_server import FakeProject, FakeServer, observation, track
 from tests.qgis.conftest import (
     cache_root,
@@ -209,3 +213,49 @@ def test_a_damaged_cache_offline_names_the_way_out(iface, fake, folder, monkeypa
         assert not os.path.exists(cache)
     finally:
         plugin.unload()
+
+
+@contextlib.contextmanager
+def locked(path: str) -> Iterator[None]:
+    holder = sqlite3.connect(path, isolation_level=None)
+    try:
+        holder.execute("PRAGMA locking_mode=EXCLUSIVE")
+        holder.execute("BEGIN EXCLUSIVE")
+        holder.execute("UPDATE comapeo_meta SET value = value")
+        yield
+    finally:
+        holder.rollback()
+        holder.close()
+
+
+@contextlib.contextmanager
+def unreadable(path: str) -> Iterator[None]:
+    os.chmod(path, 0)
+    try:
+        yield
+    finally:
+        os.chmod(path, 0o600)
+
+
+@pytest.mark.parametrize(
+    "hold",
+    [
+        locked,
+        pytest.param(
+            unreadable,
+            marks=pytest.mark.skipif(os.name != "posix", reason="POSIX permissions"),
+        ),
+    ],
+)
+def test_a_cache_another_program_holds_is_not_taken_for_damage(
+    iface, fake, folder, hold
+):
+    _project_file, cache, _styling = save_project_with_layers(iface, fake, folder)
+    with hold(cache):
+        assert sqlite_error(cache) is not None
+        started = time.monotonic()
+        assert not ProjectCache(cache_root(), "p1").is_damaged()
+        # A lock must not hold up the main thread for SQLite's default busy timeout.
+        assert time.monotonic() - started < 2
+    assert moved_aside() == []
+    assert sqlite_error(cache) is None
