@@ -131,13 +131,21 @@ def test_a_photo_not_yet_synced_shows_a_placeholder(plugin, served):
     wait_until(lambda: "Not yet synced" in [i.text() for i in photo_items(panel)])
 
 
-def test_audio_is_cached_with_its_type_and_played_in_the_panel(plugin, served):
+def test_audio_is_cached_with_its_type_and_played_in_the_panel(plugin, served, opened):
     layer = observations_layer(plugin, served)
     panel = plugin.dock.media_area
     feature = find(served, "audio", available=True)
     [audio] = [a for a in feature["attachments"] if a["type"] == "audio"][:1]
     select(layer, feature)
-    wait_until(lambda: buttons(panel, "playButton"), message="audio control")
+    wait_until(lambda: buttons(panel, "openAudioButton"), message="audio control")
+    if not panel.player.available:
+        # A QGIS build without QtMultimedia offers only the system player.
+        assert not buttons(panel, "playButton")
+        buttons(panel, "openAudioButton")[0].click()
+        wait_until(lambda: opened, message="opened in the system player")
+        assert opened[0].name == "original.wav"
+        assert opened[0].read_bytes() == http_body(audio["urls"]["original"])
+        return
     play = buttons(panel, "playButton")[0]
     play.click()
     wait_until(lambda: panel.player.path is not None, message="playback started")
