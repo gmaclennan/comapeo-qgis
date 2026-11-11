@@ -65,6 +65,9 @@ class DevServer:
         photos: int = 4,
         projects: int = 1,
         discovery_dir: str | None = None,
+        allow_edits: bool = False,
+        as_member: bool = False,
+        edit_delay: int = 0,
     ) -> None:
         self._owns_discovery_dir = discovery_dir is None
         self.discovery_dir = discovery_dir or short_tempdir()
@@ -84,6 +87,9 @@ class DevServer:
                 str(photos),
                 "--projects",
                 str(projects),
+                *(["--allow-edits"] if allow_edits else []),
+                *(["--as-member"] if as_member else []),
+                *(["--edit-delay", str(edit_delay)] if edit_delay else []),
             ],
             cwd=SERVER_DIR,
             stdin=subprocess.PIPE,
@@ -156,7 +162,7 @@ class DevServer:
                 continue
 
     def run(self, text: str) -> dict:
-        """Run a stdin command (create, update, delete, category); parse its reply."""
+        """Run a stdin command (`help` lists them); parse its reply."""
         return json.loads(self.command(text)[3:])
 
     def wait_ready(self) -> None:
