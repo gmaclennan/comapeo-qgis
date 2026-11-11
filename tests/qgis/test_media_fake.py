@@ -207,3 +207,67 @@ def test_a_download_cut_off_part_way_is_not_kept(plugin, fake, http):
     wait_until(lambda: [i.text() for i in photo_items(panel)] == [""])
     [saved] = media_files()
     assert saved.read_bytes() == whole
+
+
+def test_a_failed_file_is_tried_again_on_refresh_and_when_reselected(
+    plugin, fake, http
+):
+    a = observation("a")
+    a["attachments"] = [photo(http, "flaky", "#ff0000")]
+    layer = start(plugin, fake, [a, observation("b")])
+    panel = plugin.dock.media_area
+    http.serve("/blobs/flaky/thumbnail", b"oops", "text/plain", status=500)
+    http.serve("/blobs/flaky/preview", b"oops", "text/plain", status=500)
+    select(layer, ["a"])
+    wait_until(lambda: [i.text() for i in photo_items(panel)] == ["Could not load"])
+    panel.photos.itemClicked.emit(photo_items(panel)[0])
+    wait_until(lambda: "could not be loaded" in panel.preview.text())
+
+    http.serve("/blobs/flaky/thumbnail", jpeg("#ff0000"), "image/jpeg")
+    plugin.dock.refresh_button.click()
+    wait_until(lambda: [i.text() for i in photo_items(panel)] == [""])
+    wait_until(lambda: "could not be loaded" in panel.preview.text())
+
+    http.serve("/blobs/flaky/preview", jpeg("#ff0000"), "image/jpeg")
+    select(layer, ["b"])
+    select(layer, ["a"])
+    wait_until(lambda: photo_items(panel) and photo_items(panel)[0].text() == "")
+    panel.photos.itemClicked.emit(photo_items(panel)[0])
+    wait_until(lambda: shows_image(panel.preview))
+
+
+def test_the_panel_follows_the_media_server_to_a_new_port(plugin, fake, http):
+    a = observation("a")
+    a["attachments"] = [photo(http, "moved", "#ff0000")]
+    layer = start(plugin, fake, [a])
+    panel = plugin.dock.media_area
+    select(layer, ["a"])
+    wait_until(lambda: [i.text() for i in photo_items(panel)] == [""])
+
+    moved = MediaServer().start()
+    try:
+        a["attachments"] = [photo(moved, "moved", "#ff0000")]
+        http.stop()
+        panel.photos.itemClicked.emit(photo_items(panel)[0])
+        wait_until(lambda: "could not be loaded" in panel.preview.text())
+        plugin.dock.refresh_button.click()
+        wait_until(lambda: shows_image(panel.preview))
+        assert moved.requests == ["/blobs/moved/preview"]
+    finally:
+        moved.stop()
+
+
+def test_with_the_app_gone_the_panel_says_what_is_not_saved(plugin, fake, http):
+    a = observation("a")
+    a["attachments"] = [photo(http, "kept", "#ff0000")]
+    layer = start(plugin, fake, [a])
+    panel = plugin.dock.media_area
+    select(layer, ["a"])
+    wait_until(lambda: [i.text() for i in photo_items(panel)] == [""])
+    fake.stop()
+    wait_until(lambda: not plugin.controller.connected, message="disconnect")
+    wait_until(lambda: "not connected" in panel.message.text())
+    panel.photos.itemClicked.emit(photo_items(panel)[0])
+    assert "not saved on this computer" in panel.preview.text()
+    pump(300)
+    assert "/blobs/kept/preview" not in http.requests
