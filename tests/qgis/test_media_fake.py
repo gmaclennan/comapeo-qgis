@@ -188,3 +188,22 @@ def test_download_all_media_can_be_cancelled(plugin, fake, http):
         == [media_files()[0].parent.name] * 3
     )
     assert not any(p.name.startswith(".part-") for p in media_files())
+
+
+def test_a_download_cut_off_part_way_is_not_kept(plugin, fake, http):
+    a = observation("a")
+    attachment = photo(http, "cut", "#ff0000")
+    a["attachments"] = [attachment]
+    whole = jpeg("#ff0000")
+    http.serve("/blobs/cut/thumbnail", whole, "image/jpeg", truncate=True)
+    layer = start(plugin, fake, [a])
+    panel = plugin.dock.media_area
+    select(layer, ["a"])
+    wait_until(lambda: [i.text() for i in photo_items(panel)] == ["Could not load"])
+    assert media_files() == []
+
+    http.serve("/blobs/cut/thumbnail", whole, "image/jpeg")
+    plugin.dock.refresh_button.click()
+    wait_until(lambda: [i.text() for i in photo_items(panel)] == [""])
+    [saved] = media_files()
+    assert saved.read_bytes() == whole
