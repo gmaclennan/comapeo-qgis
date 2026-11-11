@@ -577,3 +577,63 @@ def test_a_column_added_in_the_session_is_discarded(fake, plugin):
     assert layer.commitChanges()
     assert served(fake, "o2")["properties"]["notes"] == "and again"
     assert "extra" not in layer.dataProvider().fields().names()
+
+
+def test_connection_lost_while_the_large_save_question_is_open(
+    fake, plugin, iface, monkeypatch
+):
+    monkeypatch.setattr(editing, "LARGE_SAVE", 2)
+    layer = open_layer(fake, plugin)
+
+    def ask(*_args):
+        fake.stop()
+        wait_until(lambda: plugin.controller.client_for("p1") is None, message="lost")
+        return QMessageBox.StandardButton.Save
+
+    monkeypatch.setattr(QMessageBox, "question", ask)
+    assert layer.startEditing()
+    for doc_id in ("o1", "o2", "o3"):
+        change(layer, doc_id, "notes", f"typed {doc_id}")
+    assert layer.deleteFeature(fid(layer, "o4"))
+    assert not layer.commitChanges(False)
+    wait_until(lambda: any("not connected" in t for t in iface.bar_texts()))
+    stored = {f["id"]: plain(f["notes"]) for f in layer.dataProvider().getFeatures()}
+    assert stored == {d: f"note {d}" for d in DOCS}
+    assert fake.edits() == []
+    wait_until(lambda: len(layer.editBuffer().changedAttributeValues()) == 3)
+    assert len(layer.editBuffer().deletedFeatureIds()) == 1
+    assert "o4" not in rows(layer)
+    assert not layer.editBuffer().addedFeatures()
+
+
+def test_role_removed_while_the_large_save_question_is_open(
+    fake, plugin, iface, monkeypatch
+):
+    monkeypatch.setattr(editing, "LARGE_SAVE", 2)
+    layer = open_layer(fake, plugin)
+    controller = plugin.controller
+
+    def ask(*_args):
+        fake.role = "blocked"
+        fake.notify(
+            "layer.schemaChanged", {"projectId": "p1", "layerId": "observations"}
+        )
+        wait_until(
+            lambda: controller.live_definition("p1", "observations").editable is False,
+            message="role removed",
+        )
+        return QMessageBox.StandardButton.Save
+
+    monkeypatch.setattr(QMessageBox, "question", ask)
+    assert layer.startEditing()
+    for doc_id in ("o1", "o2", "o3"):
+        change(layer, doc_id, "notes", f"typed {doc_id}")
+    assert not layer.commitChanges(False)
+    wait_until(
+        lambda: any(
+            "Your role in this project does not allow editing." in t
+            for t in iface.bar_texts()
+        )
+    )
+    assert fake.edits() == []
+    wait_until(lambda: len(layer.editBuffer().changedAttributeValues()) == 3)

@@ -43,6 +43,7 @@ from ..core.editing import (
     EditRequest,
     RowBase,
     RowChange,
+    SavePlan,
     busy_text,
     checked_text,
     column_fits,
@@ -56,6 +57,7 @@ from ..core.editing import (
     summary_text,
     waiting_text,
 )
+from ..core.model import LayerDefinition
 from .cache import TableInfo, stored_forks
 
 if TYPE_CHECKING:
@@ -319,25 +321,61 @@ class EditHook(QObject):
     def _before_commit(self, stop_editing: bool) -> None:
         if self._muted or not self.layer.isModified():
             return
+        # Raising in this slot does not stop QGIS's commit, which would then
+        # write the buffer to the cache: every failure up to _send must refuse.
         try:
-            snapshot = self._snapshot()
-        except Exception as err:  # never let QGIS write the buffer instead
+            prepared = self._prepare()
+        except Exception as err:
             QgsMessageLog.logMessage(
-                f"Could not read the edits to save: {err!r}",
+                f"Could not prepare the edits to save: {err!r}",
                 "CoMapeo",
                 Qgis.MessageLevel.Critical,
             )
-            self._refuse(INTERNAL_TEXT)
+            prepared = INTERNAL_TEXT
+        if isinstance(prepared, str):
+            self._refuse(prepared)
             return
-        changes, created, schema_changed = snapshot
+        plan, live, schema_changed = prepared
+        labels = {c.name: c.label for c in live.columns}
+        self._send(plan.requests, labels, discard_messages(plan.discards, labels))
+        if schema_changed:
+            self._tidy_after_schema_change(stop_editing)
+
+    def _prepare(self) -> tuple[SavePlan, LayerDefinition, bool] | str:
+        """The save to send, or why the whole save must wait."""
+        changes, created, schema_changed = self._snapshot()
+        live = self._ready()
+        if isinstance(live, str):
+            return live
+        plan = self._plan(live, changes, created, schema_changed)
+        if isinstance(plan, str) or len(plan.requests) <= LARGE_SAVE:
+            return plan if isinstance(plan, str) else (plan, live, schema_changed)
+        if not self._confirm(len(plan.requests)):
+            return f"Not saved. {KEPT}"
+        # The question ran the event loop: the connection or the app's
+        # description of the layer may have changed meanwhile.
+        live = self._ready()
+        if isinstance(live, str):
+            return live
+        plan = self._plan(live, changes, created, schema_changed)
+        return plan if isinstance(plan, str) else (plan, live, schema_changed)
+
+    def _ready(self) -> LayerDefinition | str:
         refusal = self._refusal()
         if refusal is not None:
-            self._refuse(refusal)
-            return
+            return refusal
         allowed, message, live = self.controller.edit_state(self.layer)
         if not allowed or live is None:
-            self._refuse(f"Not saved. {message} {KEPT}")
-            return
+            return f"Not saved. {message} {KEPT}"
+        return live
+
+    def _plan(
+        self,
+        live: LayerDefinition,
+        changes: list[RowChange],
+        created: int,
+        schema_changed: bool,
+    ) -> SavePlan | str:
         plan = plan_save(
             live,
             self.project_id,
@@ -354,15 +392,8 @@ class EditHook(QObject):
                 "CoMapeo",
                 Qgis.MessageLevel.Critical,
             )
-            self._refuse(INTERNAL_TEXT)
-            return
-        if len(plan.requests) > LARGE_SAVE and not self._confirm(len(plan.requests)):
-            self._refuse(f"Not saved. {KEPT}")
-            return
-        labels = {c.name: c.label for c in live.columns}
-        self._send(plan.requests, labels, discard_messages(plan.discards, labels))
-        if schema_changed:
-            self._tidy_after_schema_change(stop_editing)
+            return INTERNAL_TEXT
+        return plan
 
     def _refusal(self) -> str | None:
         """Why the whole save must wait, keeping the edits; None to go ahead."""
@@ -515,6 +546,7 @@ class EditHook(QObject):
     ) -> None:
         client = self.controller.client_for(self.project_id)
         if client is None:
+            self._refuse(NOT_CONNECTED_TEXT)
             return
         self._count += 1
         key = f"save:{self.layer.id()}:{self._count}"
