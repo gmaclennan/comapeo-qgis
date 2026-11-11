@@ -22,6 +22,7 @@ from qgis.PyQt.QtCore import QCoreApplication, QEvent, QObject, QTimer, pyqtSign
 
 from ..core.media import MediaCache
 from ..core.model import (
+    GEOMETRY_LINESTRING,
     LayerDefinition,
     Project,
     parse_categories,
@@ -748,9 +749,12 @@ class Controller(QObject):
     def _on_data_changed(self, project_id: str, layer_id: str) -> None:
         cache = self.cache(project_id)
         info = cache.table(layer_id)
+        # Tracks list categories as they come into use; points list them all already.
+        kind = info.definition.geometry_type if info is not None else None
+        lines = kind == GEOMETRY_LINESTRING
         for layer in self._layers_of(project_id, layer_id):
             layer.reload()
-            if info is not None:
+            if lines:
                 append_new_categories(layer, info, cache.categories())
             layer.triggerRepaint()
         self.changed.emit()

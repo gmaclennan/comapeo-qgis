@@ -87,3 +87,17 @@ def test_a_categories_change_does_not_add_unused_ones_to_tracks(plugin, fake):
     wait_until(lambda: tracks.source() != source, message="tracks table rebuilt")
     wait_until(lambda: not plugin.controller.project_status("p1").busy)
     assert legend(tracks) == {"cat-walk", None}
+
+
+def test_a_live_change_leaves_an_observations_entry_the_user_deleted(plugin, fake):
+    observations, _tracks = synced(plugin)
+    renderer = observations.renderer()
+    assert renderer.deleteCategory(renderer.categoryIndexForValue("cat-walk"))
+
+    fake.projects["p1"].features["observations"].append(observation("b"))
+    changed = {"projectId": "p1", "layerId": "observations", "ids": ["b"]}
+    fake.notify("layer.changed", changed)
+    wait_until(lambda: set(rows(observations)) == {"a", "b"})
+    wait_until(lambda: not plugin.controller.project_status("p1").busy)
+
+    assert legend(observations) == {"cat-school", "cat-boat", None}
