@@ -370,3 +370,32 @@ def test_download_all_media_skips_a_variant_it_does_not_know(plugin, fake, http)
     assert "/blobs/odd/huge" not in http.requests
     assert len(media_files()) == 3
     assert not any(p.name.startswith(".part-") for p in media_files())
+
+
+@pytest.mark.parametrize("framing", ["chunked", "close"])
+def test_a_download_without_a_content_length_is_kept_only_when_its_end_is_marked(
+    plugin, fake, http, framing
+):
+    a = observation("a")
+    a["attachments"] = [photo(http, "cut", "#ff0000")]
+    whole = jpeg("#ff0000")
+    path = "/blobs/cut/thumbnail"
+    http.serve(path, whole, "image/jpeg", truncate=True, framing=framing)
+    layer = start(plugin, fake, [a])
+    panel = plugin.dock.media_area
+    select(layer, ["a"])
+    wait_until(lambda: [i.text() for i in photo_items(panel)] == ["Could not load"])
+    assert media_files() == []
+
+    http.serve(path, whole, "image/jpeg", framing=framing)
+    plugin.dock.refresh_button.click()
+    if framing == "chunked":
+        wait_until(lambda: [i.text() for i in photo_items(panel)] == [""])
+        [saved] = media_files()
+        assert saved.read_bytes() == whole
+    else:
+        # Only the closed connection ends this body, so a whole one looks the same.
+        wait_until(lambda: http.requests.count(path) == 2)
+        pump(300)
+        assert [i.text() for i in photo_items(panel)] == ["Could not load"]
+        assert media_files() == []
