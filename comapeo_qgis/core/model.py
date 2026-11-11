@@ -404,6 +404,21 @@ def _parse_attachment(item: Any) -> Attachment | None:
     )
 
 
+def attachments_from_json(text: Any) -> tuple[Attachment, ...]:
+    """Attachments as the cache stores them (a JSON list), tolerant of junk."""
+    if not isinstance(text, str):
+        return ()
+    try:
+        return parse_attachments(json.loads(text))
+    except ValueError:
+        return ()
+
+
+def parse_attachments(items: Any) -> tuple[Attachment, ...]:
+    found = (_parse_attachment(item) for item in _list(items))
+    return tuple(a for a in found if a is not None)
+
+
 def parse_categories(result: Any) -> list[Category]:
     categories = []
     for item in _list(_get(result, "categories")):

@@ -1,6 +1,6 @@
 """End-to-end smoke check in a real QGIS window against the local API dev server.
 
-    scripts/smoke-e2e.sh [--qgis-version 4.2.3] [--out docs/evidence] [--keep]
+    scripts/smoke-e2e.sh [--qgis-version 4.2.3] [--out docs/evidence] [--keep] [--media]
 
 1. Starts the dev server with its discovery file in a short temporary folder.
 2. Creates a throwaway QGIS profile folder, links the plugin into it and enables it.
@@ -9,6 +9,10 @@
    waits for an observation this driver creates on the server to reach the map.
 4. Stops the server and launches QGIS again on the saved project, which must show
    the cached data marked as not connected.
+
+With --media it instead runs scripts/smoke_media_in_qgis.py: the CoMapeo panel
+with an observation's photos, a photo not yet synced, audio playback and
+"Download all media", with screenshots prefixed `media-`.
 
 Exits non-zero if any check fails. QGIS is killed if it hangs.
 """
@@ -25,6 +29,8 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 from typing import Any
 
@@ -37,6 +43,7 @@ from tests import dev_server  # noqa: E402
 from tests.driver import BlockingClient  # noqa: E402
 
 IN_QGIS = ROOT / "scripts" / "smoke_in_qgis.py"
+MEDIA_IN_QGIS = ROOT / "scripts" / "smoke_media_in_qgis.py"
 PLUGIN = "comapeo_qgis"
 PROJECT_PREFIX = "Tapajós"
 
@@ -107,7 +114,9 @@ class Run:
         self.args = args
         self.out = Path(args.out).resolve()
         self.out.mkdir(parents=True, exist_ok=True)
-        self.prefix = f"qgis-{args.qgis_version}"
+        self.prefix = ("media-" if args.media else "") + f"qgis-{args.qgis_version}"
+        self.script = MEDIA_IN_QGIS if args.media else IN_QGIS
+        self.media_targets: dict[str, Any] = {}
         # Short: the dev server's socket lives under the discovery folder.
         self.work = Path(tempfile.mkdtemp(prefix="cqs-", dir="/tmp"))
         self.discovery = self.work / "d"
@@ -135,6 +144,7 @@ class Run:
                 "COMAPEO_SMOKE_MODE": mode,
                 "COMAPEO_SMOKE_PREFIX": self.prefix,
                 "COMAPEO_SMOKE_PROJECT": project_id,
+                "COMAPEO_SMOKE_MEDIA": json.dumps(self.media_targets),
                 "PYTHONDONTWRITEBYTECODE": "1",
                 "PYTHONFAULTHANDLER": "1",
             }
@@ -153,7 +163,7 @@ class Run:
             "--noversioncheck",
             *extra,
             "--code",
-            str(IN_QGIS),
+            str(self.script),
         ]
         with open(log_path, "w", encoding="utf-8") as log:
             proc = subprocess.Popen(
@@ -366,12 +376,139 @@ class Run:
             badges,
         )
 
+    def media(self) -> None:
+        print("Starting the dev server…")
+        self.server = dev_server.start(
+            discovery_dir=str(self.discovery),
+            observations=self.args.observations,
+            tracks=self.args.tracks,
+            photos=self.args.photos,
+            projects=1,
+        )
+        oracle = Oracle(str(self.discovery))
+        project_id = oracle.projects()[0]["projectId"]
+        targets = pick_media(oracle, project_id)
+        oracle.close()
+        self.media_targets = targets
+        print(f"Media targets: {targets}")
+        make_profile(self.profiles)
+        print(f"Launching QGIS {self.args.qgis_version}…")
+        report = self.launch("media", project_id, [])
+        if report is None:
+            return
+        self.check("media: plugin loaded by QGIS", report.get("pluginLoaded"))
+        self.check(
+            "media: no failures in the QGIS script",
+            not report.get("failures"),
+            report.get("failures") or None,
+        )
+        self.check(
+            "media: no Python exceptions",
+            not report.get("exceptions"),
+            report.get("exceptions") or None,
+        )
+        python_errors = [
+            m for m in report.get("messageLog", []) if m["tag"] == "Python error"
+        ]
+        self.check("media: no Python errors in the log", not python_errors)
+        thumbnails = report.get("thumbnails", {})
+        self.check(
+            "media: every photo shows a thumbnail",
+            thumbnails.get("captions") == [""] * targets["photoCount"]
+            and not any(thumbnails.get("iconsNull", [True])),
+            thumbnails,
+        )
+        preview = report.get("preview", {})
+        self.check(
+            "media: a click shows a larger view",
+            preview.get("width", 0) > 96
+            and preview.get("labelVisible")
+            and preview.get("labelHeight", 0) >= preview.get("height", 1),
+            preview,
+        )
+        opened = report.get("openedOriginal", {})
+        self.check(
+            "media: Open original hands the downloaded original to the system",
+            opened.get("name") == "original.jpg"
+            and opened.get("bytes") == targets["originalBytes"],
+            opened,
+        )
+        self.check(
+            "media: a photo not yet synced shows the placeholder",
+            "Not yet synced" in report.get("notSynced", {}).get("captions", []),
+            report.get("notSynced"),
+        )
+        audio = report.get("audio", {})
+        samples = audio.get("samples", [])
+        positions = [s["position"] for s in samples if s["state"] == "playing"]
+        self.check(
+            "media: audio cached as .wav and played in the panel",
+            audio.get("file") == "original.wav" and len(set(positions)) >= 3,
+            {"file": audio.get("file"), "positions": positions},
+        )
+        self.check(
+            "media: playback reaches the end",
+            any(s["mediaStatus"] == "EndOfMedia" for s in samples),
+            samples[-1] if samples else None,
+        )
+        self.check(
+            "media: hints for no and several selected",
+            report.get("hintNoSelection", "").startswith("Select an observation")
+            and "observations selected" in report.get("hintSeveral", ""),
+            [report.get("hintNoSelection"), report.get("hintSeveral")],
+        )
+        self.check(
+            "media: Download all media reports what it did",
+            "downloaded" in report.get("downloadAll", ""),
+            report.get("downloadAll"),
+        )
+
     def close(self) -> None:
         if self.server is not None:
             self.server.stop()
             self.server = None
         if not self.args.keep:
             shutil.rmtree(self.work, ignore_errors=True)
+
+
+def http_status(url: str) -> tuple[int, int]:
+    """Status and body size; only the dev server's own 127.0.0.1 URLs come here."""
+    try:
+        with urllib.request.urlopen(url, timeout=20) as reply:  # noqa: S310
+            return reply.status, len(reply.read())
+    except urllib.error.HTTPError as err:
+        return err.code, 0
+
+
+def pick_media(oracle: Oracle, project_id: str) -> dict[str, Any]:
+    """Observations to select: photos that all load, a photo not yet synced, audio."""
+    targets: dict[str, Any] = {}
+    cursor = None
+    while True:
+        params: dict[str, Any] = {"projectId": project_id, "layerId": "observations"}
+        if cursor is not None:
+            params["cursor"] = cursor
+        page = oracle.client.call("layers.getFeatures", params)
+        for feature in page["features"]:
+            attachments = feature["attachments"]
+            photos = [a for a in attachments if a["type"] == "photo"]
+            statuses = [http_status(a["urls"]["original"]) for a in attachments]
+            loads = all(code == 200 for code, _size in statuses)
+            if len(photos) >= 2 and loads and "photos" not in targets:
+                targets["photos"] = feature["id"]
+                targets["photoCount"] = len(photos)
+                targets["originalBytes"] = http_status(photos[0]["urls"]["original"])[1]
+            if photos and not loads and "notSynced" not in targets:
+                targets["notSynced"] = feature["id"]
+            if loads and any(a["type"] == "audio" for a in attachments):
+                targets.setdefault("audio", feature["id"])
+        cursor = page["nextCursor"]
+        if cursor is None:
+            break
+    missing = {"photos", "notSynced", "audio"} - set(targets)
+    if missing:
+        raise SystemExit(f"The dev server served no observation for {missing}")
+    return targets
 
 
 def scrub_file(path: Path) -> None:
@@ -388,6 +525,9 @@ def main() -> int:
     parser.add_argument("--tracks", type=int, default=4)
     parser.add_argument("--photos", type=int, default=6)
     parser.add_argument("--keep", action="store_true", help="keep the work folder")
+    parser.add_argument(
+        "--media", action="store_true", help="check the photo and audio panel"
+    )
     args = parser.parse_args()
     reason = dev_server.skip_reason()
     if reason:
@@ -395,9 +535,12 @@ def main() -> int:
         return 2
     run = Run(args)
     try:
-        run.live()
-        if hasattr(run, "project_id"):
-            run.offline()
+        if args.media:
+            run.media()
+        else:
+            run.live()
+            if hasattr(run, "project_id"):
+                run.offline()
     finally:
         run.close()
     summary = run.out / f"{run.prefix}-summary.json"

@@ -14,6 +14,7 @@ QGIS plugin ("CoMapeo") that shows CoMapeo project data as QGIS layers by talkin
 | Tests under QGIS's Python (macOS) | `scripts/qgis-python.sh --install-test-deps` once, then `scripts/qgis-python.sh -m pytest`; `QGIS_VERSION=4.0.2` switches app. This is the only run that includes `tests/qgis/` |
 | Any script under QGIS's Python | `scripts/qgis-python.sh path/to/script.py` |
 | Smoke check in a real QGIS window (macOS) | `scripts/smoke-e2e.sh [--qgis-version 4.0.2]`: dev server, throwaway profile, Browser double-clicks, live update, then the saved project offline; screenshots and reports go to `docs/evidence/` |
+| Media smoke check in a real QGIS window (macOS) | `scripts/smoke-e2e.sh --media --photos 20 --observations 120`: thumbnails, larger view, Open original, not-synced placeholder, audio playback samples, Download all media; files prefixed `media-` |
 
 Everything must pass in `.venv` and under `scripts/qgis-python.sh` before you finish.
 
@@ -32,7 +33,8 @@ comapeo_qgis/          the plugin package (what gets zipped and installed)
     discovery.py       finding discovery files per build type and OS, plus extra locations
     model.py           API results to neutral records (fields, features, categories)
     reconcile.py       cache diffs, layer rebuild decisions
-    media.py           attachment file cache keyed by attachment key
+    media.py           attachment file cache keyed by attachment key and variant; extension
+                       from the HTTP content type through an allow-list
   qgis_tier/           everything that needs QGIS
     transport.py       QLocalSocket driver for core/protocol.py (main thread, QTimer deadlines)
     connection.py      Connector: discovery scans, one client per build type, reconnect backoff
@@ -41,12 +43,17 @@ comapeo_qgis/          the plugin package (what gets zipped and installed)
     controller.py      Controller: ties the above to QgsProject (adopt, re-attach, status)
     layers.py style.py map-layer properties and the default categorized style
     browser.py dock.py indicators.py   Browser entry, CoMapeo panel, stale badges
+    media.py           MediaFetcher (QNetworkAccessManager, streamed to disk), MediaDownload
+    media_panel.py     the panel's photos and audio for the selected observation
+    audio.py           AudioPlayer over QtMultimedia (Qt5 setMedia, Qt6 setSource/QAudioOutput)
 tests/                 plain pytest; fake_server.py implements PROTOCOL.md over a real socket,
                        with test hooks: fail_next() injects an error reply, stuck_cursor repeats a cursor
   winpipe.py           Windows named pipes for the fake server and driver
   dev_server.py        starts `node src/dev/cli.ts` in ../comapeo-local-api for tests
   test_real_server.py  runs the core against that dev server; skips when the checkout,
                        its node_modules or Node 22.18+ is missing
+  media_server.py      a real HTTP server on 127.0.0.1 for media cases the dev server
+                       cannot produce (held replies, a 404 that later succeeds)
 tests/qgis/            tests that need QGIS; tests/conftest.py leaves them out elsewhere.
                        conftest.py has a real-widget iface and `wait_until` (runs the event loop)
 scripts/qgis-python.sh headless runner for the bundled Python of a local QGIS app
@@ -61,7 +68,9 @@ scripts/smoke_e2e.py   drives the real-window smoke check; smoke_in_qgis.py runs
 - `core/` must never import `qgis` or PyQt; `tests/test_packaging.py` enforces this.
 - Tests check behaviour through public surfaces (bytes on the socket, the core API, resulting QGIS layers), not private functions or mock call counts. Prefer real sockets and real QGIS objects over mocks.
 - Unix socket paths must stay under about 100 bytes: tests use `tests.fake_server.short_tempdir()`, not pytest's `tmp_path`.
-- Cache downloaded media by attachment key and variant, never by URL; the media server port changes every launch.
+- Cache downloaded media by attachment key and variant, never by URL; the media server port changes every launch. The attachment lists stored in the cache rows keep the URLs from when the row was written: never fetch from them. When the app is connected, ask it again (`layers.getFeatures` with `ids`) for current URLs.
+- Every asynchronous media result in the panel is checked against the selection it was started for (a generation counter); a late reply must never show under a newer selection.
+- Only `http` URLs on a loopback host are fetched (`core.media.is_media_url`), with no proxy and no redirects.
 - Comments only for a non-obvious why, one line.
 - QGIS tests wait with `wait_until` (runs the Qt event loop), never `time.sleep`. They compare QGIS layers with what the server serves over a second connection (`tests/qgis/helpers.Oracle`), not with the plugin's own state. Tests never touch the real QGIS profile (conftest asserts it) and point discovery at an empty folder unless they start a server.
 
@@ -80,4 +89,9 @@ scripts/smoke_e2e.py   drives the real-window smoke check; smoke_in_qgis.py runs
 - `FrameDecoder` refuses a frame whose JSON nests deeper than `MAX_JSON_DEPTH` (64), because Python 3.14 parses nesting that older versions reject with `RecursionError`. The depth is checked after a successful parse, as the scan's string pattern is very slow on an unterminated string, which the parser rejects quickly.
 - The protocol has no notification for projects joined or left, so the controller re-lists projects every 10 s (`PROJECT_POLL_MS`); a poll only acts on projects that appeared, disappeared or were renamed, never refetching the ones on the map.
 - Discovery: the installed builds' data folders are listed in `core/discovery.APP_FOLDERS`. A development build of desktop is not among them (its data is in its checkout), so it is found only through an extra location: the panel's "Other app locations…" (setting `comapeo/extraDiscoveryPaths`) or `COMAPEO_LOCAL_API_DISCOVERY_EXTRA`. Each extra location is a build keyed `extra:<location>`, with the location tidied first (trailing and doubled separators and `.` steps dropped) so one folder spelt two ways is one build. At each scan the connector closes the connection of any build no longer among the locations looked in, so removing an extra location, or setting the override, takes effect while that build is connected. The override (`comapeo/discoveryPath` or `COMAPEO_LOCAL_API_DISCOVERY`) replaces every location, extras included; tests rely on that never to read a real app's folder, so keep it that way.
+- `layer.reload()` drops the user's selection; the controller re-selects the same documents (`_reload_keeping_selection`), otherwise every refresh would clear the media panel.
+- Media downloads: a reply can fail after a 200 header (app closed mid-file, transfer timeout). `MediaFetcher` keeps a file only for a 200 with no network error and, when sent, the full Content-Length; anything else is deleted and recorded as an error, which Refresh, an app connecting and a fresh attachment list for the selection all clear.
+- Audio on Qt5: Qt5 has its own `QAudioOutput`, a raw PCM sink unrelated to `QMediaPlayer`, so `audio.py` picks the Qt6 path by `hasattr(player, "setAudioOutput")`. PyQt5 passes player states as plain ints: compare them with the enum (`QMediaPlayer.PlaybackState` on Qt6, `QMediaPlayer.State` on Qt5), never by `.name`.
+- Audio: under `QT_QPA_PLATFORM=offscreen` (the pytest runs) QMediaPlayer stays in `LoadingMedia` on macOS and never plays, so pytest only checks the control and the cached file. Playback is checked in the real-window media smoke run, which samples state and position. Tests open files through `QDesktopServices.setUrlHandler("file", ...)` (the `opened` fixture), so no viewer is ever launched.
+- `http.server` looks up the host name on bind, which can take 30 s on macOS; `tests/media_server.py` skips that.
 - Several app builds can run at once. The cache records the build that last served a project (`buildType` in the `project` metadata), and a project is reported "No longer available" only once that build has listed its projects without it; while that build is not connected the project reads "Not connected".

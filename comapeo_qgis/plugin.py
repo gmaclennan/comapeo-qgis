@@ -84,6 +84,8 @@ class CoMapeoPlugin:
             self.indicators.clear()
             self.indicators.deleteLater()
             self.indicators = None
+        if self.dock is not None:
+            self.dock.media_area.shutdown()
         self.controller.stop()
         if self.provider is not None:
             self.provider.shutdown()

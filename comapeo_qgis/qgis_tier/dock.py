@@ -1,15 +1,20 @@
-"""The CoMapeo side panel: connection status, projects, last updated, Refresh."""
+"""The CoMapeo side panel: connection status, projects, last updated, Refresh,
+and the selected observation's photos and audio."""
 
 from __future__ import annotations
+
+import contextlib
 
 from qgis.gui import QgsDockWidget
 from qgis.PyQt.QtCore import QEvent, QObject, QSize, Qt, QTimer
 from qgis.PyQt.QtWidgets import (
+    QFrame,
     QHBoxLayout,
     QHeaderView,
     QInputDialog,
     QLabel,
     QMessageBox,
+    QProgressBar,
     QPushButton,
     QTreeWidget,
     QTreeWidgetItem,
@@ -23,14 +28,12 @@ from .controller import (
     extra_discovery_locations,
     set_extra_discovery_locations,
 )
+from .media_panel import MediaPanel
 
 _ROLE_PROJECT = Qt.ItemDataRole.UserRole
 
 
 class CoMapeoDock(QgsDockWidget):
-    """`media_area` is the seam for the photo and audio viewer (milestone 4):
-    a container below the project list, empty and hidden in this version."""
-
     def __init__(self, controller: Controller, parent: QWidget | None = None) -> None:
         super().__init__("CoMapeo", parent)
         self.setObjectName("CoMapeoDock")
@@ -69,8 +72,9 @@ class CoMapeoDock(QgsDockWidget):
         self._fit_timer.timeout.connect(self._fit_rows)
         header.sectionResized.connect(lambda *_: self._fit_timer.start(0))
         self.projects.viewport().installEventFilter(self)
+        self.projects.setMaximumHeight(160)
         self.projects.itemSelectionChanged.connect(self._update_buttons)
-        layout.addWidget(self.projects, 1)
+        layout.addWidget(self.projects)
         buttons = QHBoxLayout()
         self.refresh_button = QPushButton("Refresh", body)
         self.refresh_button.setObjectName("refreshButton")
@@ -84,12 +88,36 @@ class CoMapeoDock(QgsDockWidget):
         for button in (self.refresh_button, self.add_button, self.remove_button):
             buttons.addWidget(button)
         layout.addLayout(buttons)
-        self.media_area = QWidget(body)
-        self.media_area.setObjectName("mediaArea")
-        self.media_area.hide()
-        layout.addWidget(self.media_area)
+        downloads = QHBoxLayout()
+        self.download_button = QPushButton("Download all media", body)
+        self.download_button.setObjectName("downloadButton")
+        self.download_button.setToolTip(
+            "Save every photo, audio recording and video of the selected project "
+            "on this computer, so they can be seen while CoMapeo Desktop is closed."
+        )
+        self.download_button.clicked.connect(self._download_selected)
+        self.download_progress = QProgressBar(body)
+        self.download_progress.setObjectName("downloadProgress")
+        self.cancel_download_button = QPushButton("Cancel", body)
+        self.cancel_download_button.setObjectName("cancelDownloadButton")
+        self.cancel_download_button.clicked.connect(self._cancel_download)
+        downloads.addWidget(self.download_button)
+        downloads.addWidget(self.download_progress, 1)
+        downloads.addWidget(self.cancel_download_button)
+        layout.addLayout(downloads)
+        self.download_message = QLabel(body)
+        self.download_message.setObjectName("downloadMessage")
+        self.download_message.setWordWrap(True)
+        layout.addWidget(self.download_message)
+        line = QFrame(body)
+        line.setFrameShape(QFrame.Shape.HLine)
+        layout.addWidget(line)
+        self.media_area = MediaPanel(controller, body)
+        layout.addWidget(self.media_area, 1)
         self.setWidget(body)
         controller.changed.connect(self.update_view)
+        controller.downloadsChanged.connect(self._update_buttons)
+        self._watched_download = None
         self.update_view()
 
     def update_view(self) -> None:
@@ -167,6 +195,54 @@ class CoMapeoDock(QgsDockWidget):
         self.remove_button.setEnabled(
             project_id is not None and self.controller.cache(project_id).exists
         )
+        download = self.controller.download(project_id) if project_id else None
+        if download is not self._watched_download:
+            if self._watched_download is not None:
+                with contextlib.suppress(TypeError, RuntimeError):
+                    self._watched_download.progress.disconnect(self._on_progress)
+            if download is not None:
+                download.progress.connect(self._on_progress)
+            self._watched_download = download
+        running = download is not None
+        self.download_button.setVisible(not running)
+        self.download_button.setEnabled(
+            project_id is not None
+            and self.controller.media_client(project_id) is not None
+        )
+        self.download_progress.setVisible(running)
+        self.cancel_download_button.setVisible(running)
+        last = self.controller.last_download
+        if running:
+            self._on_progress(download.done, download.total)
+        elif last is not None and last[0] == project_id:
+            self.download_message.setText(last[1].describe())
+        else:
+            self.download_message.clear()
+        self.download_message.setVisible(bool(self.download_message.text()))
+
+    def _on_progress(self, done: int, total: int) -> None:
+        download = self._watched_download
+        if download is None:
+            return
+        if download.listing:
+            self.download_progress.setRange(0, 0)
+            self.download_message.setText("Listing the project's media…")
+        else:
+            self.download_progress.setRange(0, max(total, 1))
+            self.download_progress.setValue(done)
+            self.download_message.setText(f"Downloading {done} of {total} files…")
+        self.download_message.setVisible(True)
+
+    def _download_selected(self) -> None:
+        project_id = self.selected_project()
+        if project_id is not None:
+            self.controller.download_all_media(project_id)
+            self._update_buttons()
+
+    def _cancel_download(self) -> None:
+        download = self._watched_download
+        if download is not None:
+            download.cancel()
 
     def _edit_locations(self) -> None:
         text, ok = QInputDialog.getMultiLineText(
