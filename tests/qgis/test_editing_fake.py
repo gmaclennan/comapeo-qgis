@@ -616,6 +616,22 @@ def test_connection_lost_while_the_large_save_question_is_open(
     assert not layer.editBuffer().addedFeatures()
 
 
+def test_unloading_with_unsaved_edits_says_they_were_discarded(fake, plugin, iface):
+    layer = open_layer(fake, plugin)
+    assert layer.startEditing()
+    change(layer, "o1", "notes", "unsaved at unload")
+    assert layer.deleteFeature(fid(layer, "o2"))
+    plugin.unload()
+    assert not layer.isEditable()
+    assert fake.edits() == []
+    stored = {f["id"]: plain(f["notes"]) for f in layer.dataProvider().getFeatures()}
+    assert stored == {d: f"note {d}" for d in DOCS}
+    assert any(
+        "unsaved changes to 2 observations in Observations were discarded" in m
+        for m in plugin.log
+    ), plugin.log
+
+
 def test_a_delete_that_another_write_overlapped_is_fetched_again(fake, plugin, iface):
     layer = open_layer(fake, plugin)
     fake.concurrent_next = "kept"

@@ -168,6 +168,24 @@ class ProjectStatus:
         )
 
 
+def unloaded_text(layer: QgsVectorLayer) -> str:
+    buffer = layer.editBuffer()
+    changed = {
+        fid
+        for fid in (
+            *buffer.changedAttributeValues(),
+            *buffer.changedGeometries(),
+            *buffer.deletedFeatureIds(),
+        )
+        if fid >= 0
+    }
+    what = f"{len(changed)} observation{'s' if len(changed) != 1 else ''} in "
+    return (
+        "The CoMapeo plugin was unloaded, so unsaved changes to "
+        f"{what if changed else ''}{layer.name()} were discarded."
+    )
+
+
 def format_time(value: datetime | None) -> str:
     if value is None:
         return "at an unknown time"
@@ -290,6 +308,8 @@ class Controller(QObject):
             # Without the plugin QGIS would write the edits to the cache itself.
             with contextlib.suppress(RuntimeError):
                 if layer is not None and layer.isEditable():
+                    if layer.isModified():
+                        self.notify(Qgis.MessageLevel.Warning, unloaded_text(layer))
                     layer.rollBack()
                 if layer is not None:
                     layer.setReadOnly(True)
