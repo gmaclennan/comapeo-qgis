@@ -224,8 +224,14 @@ def run() -> None:
 
     wait_until(preview_shown, "the larger view")
     pixmap = panel().preview.pixmap()
-    report["preview"] = {"width": pixmap.width(), "height": pixmap.height()}
     save_dock("preview")
+    label = panel().preview
+    report["preview"] = {
+        "width": pixmap.width(),
+        "height": pixmap.height(),
+        "labelVisible": label.isVisible(),
+        "labelHeight": label.height(),
+    }
     QTest.mouseClick(panel().open_original_button, Qt.MouseButton.LeftButton)
     wait_until(lambda: OPENED.paths, "the original to be opened")
     opened = Path(OPENED.paths[0])

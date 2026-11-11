@@ -421,7 +421,9 @@ class Run:
         preview = report.get("preview", {})
         self.check(
             "media: a click shows a larger view",
-            preview.get("width", 0) > 96,
+            preview.get("width", 0) > 96
+            and preview.get("labelVisible")
+            and preview.get("labelHeight", 0) >= preview.get("height", 1),
             preview,
         )
         opened = report.get("openedOriginal", {})
