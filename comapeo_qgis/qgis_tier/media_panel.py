@@ -125,6 +125,7 @@ class MediaPanel(QWidget):
         self._online = False
         self._waiting_for_list = False
         self._preview_key: str | None = None
+        self._preview_image: tuple[Path, QPixmap] | None = None
         self._pending_open: tuple[int, str, str] | None = None
         self._pending_play: tuple[int, str] | None = None
         self._playing_key: str | None = None
@@ -255,6 +256,7 @@ class MediaPanel(QWidget):
         self._online = False
         self._waiting_for_list = False
         self._preview_key = None
+        self._preview_image = None
         self._pending_open = None
         self._pending_play = None
         self.action_message.clear()
@@ -461,6 +463,13 @@ class MediaPanel(QWidget):
         self.preview.hide()
         self.open_original_button.hide()
 
+    def _load_preview(self, path: Path | None) -> QPixmap:
+        if path is None:
+            return QPixmap()
+        if self._preview_image is None or self._preview_image[0] != path:
+            self._preview_image = (path, QPixmap(str(path)))
+        return self._preview_image[1]
+
     def _show_preview(self) -> None:
         attachment = self._find(self._preview_key) if self._preview_key else None
         if attachment is None or self._current is None:
@@ -471,7 +480,7 @@ class MediaPanel(QWidget):
         _state, path = self._state(attachment, variant)
         self.preview.show()
         self.open_original_button.show()
-        pixmap = QPixmap(str(path)) if path is not None else QPixmap()
+        pixmap = self._load_preview(path)
         if state == CACHED and not pixmap.isNull():
             width = max(120, min(PREVIEW_MAX, self.preview.width() - 8))
             height = min(PREVIEW_MAX, 360)
