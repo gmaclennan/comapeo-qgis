@@ -66,7 +66,14 @@ def make_profile(profiles: Path) -> None:
     (plugins / PLUGIN).symlink_to(ROOT / PLUGIN, target_is_directory=True)
     settings = default / "qgis.org"
     settings.mkdir(parents=True)
-    ini = "[PythonPlugins]\ncomapeo_qgis=true\n\n[qgis]\ncheckVersion=false\n"
+    # Without these QGIS may store a random master password in the login keychain.
+    ini = (
+        "[PythonPlugins]\ncomapeo_qgis=true\n\n"
+        "[qgis]\ncheckVersion=false\n\n"
+        "[auth]\nuse_password_helper=false\n\n"
+        "[authentication]\ngenerate-random-password-for-keychain=false\n"
+        "use-password-helper=false\n"
+    )
     for name in ("QGIS4.ini", "QGIS3.ini"):
         (settings / name).write_text(ini, encoding="utf-8")
 
