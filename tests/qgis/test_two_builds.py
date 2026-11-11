@@ -5,16 +5,21 @@ from __future__ import annotations
 import os
 import shutil
 import sys
+from urllib.parse import unquote
 
 import pytest
-from qgis.core import QgsSettings
+from qgis.core import QgsBrowserModel, QgsSettings
+from qgis.PyQt.QtCore import QModelIndex
 from qgis.PyQt.QtWidgets import QInputDialog
 
+from comapeo_qgis.core.discovery import extra_key
 from comapeo_qgis.plugin import CoMapeoPlugin
+from comapeo_qgis.qgis_tier.browser import ROOT_PATH
 from comapeo_qgis.qgis_tier.controller import extra_discovery_locations
 from tests.fake_server import FakeProject, FakeServer, observation, short_tempdir
-from tests.qgis.conftest import DISCOVERY_SETTING, pump, wait_until
+from tests.qgis.conftest import DISCOVERY_SETTING, process_events, pump, wait_until
 from tests.qgis.helpers import rows
+from tests.qgis.test_browser_model import child_index
 from tests.qgis.test_discovery_states import browser_messages
 
 
@@ -202,3 +207,29 @@ def test_removing_an_extra_location_disconnects_its_build(
     assert dev.open_connections == 1
     assert len(dev_statuses(controller)) == 1
     assert browser_messages().count("CoMapeo Desktop Dev") == 1
+
+
+def test_an_extra_location_is_one_step_of_its_browser_path(
+    plugin, dev_build, monkeypatch
+):
+    _dev, data = dev_build
+    monkeypatch.setenv("COMAPEO_LOCAL_API_DISCOVERY_EXTRA", data)
+    plugin.initGui()
+    wait_until(lambda: plugin.controller.available_layers("p9"))
+    model = QgsBrowserModel()
+    model.initialize()
+    try:
+        root = child_index(model, QModelIndex(), "CoMapeo")
+        server = child_index(model, root, "CoMapeo Desktop Dev")
+        project = child_index(model, server, "Dev project")
+        server_path = model.dataItem(server).path()
+        prefix, key, state = server_path.split("/")
+        assert (prefix, unquote(key), state) == (
+            ROOT_PATH,
+            extra_key(data),
+            "connected",
+        )
+        assert model.dataItem(project).path() == f"{server_path}/p9"
+    finally:
+        model.deleteLater()
+        process_events()
