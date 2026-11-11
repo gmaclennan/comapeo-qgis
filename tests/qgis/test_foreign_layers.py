@@ -102,7 +102,8 @@ def assert_untouched(
 ) -> None:
     assert layer.providerType() == provider
     if path is not None:
-        assert layer.source().split("|")[0] == path
+        # QGIS writes a saved project's paths with forward slashes on Windows.
+        assert os.path.normpath(layer.source().split("|")[0]) == os.path.normpath(path)
     # The pasted style itself may carry the read-only flag; it must not change.
     assert layer.readOnly() == read_only
     assert [f["name"] for f in layer.getFeatures()] == ["my village"]

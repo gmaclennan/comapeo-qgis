@@ -165,7 +165,7 @@ def test_reconnect_refreshes_and_clears_the_stale_badge(plugin):
     try:
         project = first.add_project(FakeProject("p1", "Fake project", layers=[LAYER]))
         project.features["things"] = [thing("a")]
-        use_discovery(first.write_discovery())
+        use_discovery(first.write_discovery(folder))
         plugin.initGui()
         controller = plugin.controller
         wait_until(lambda: controller.available_layers("p1"))
