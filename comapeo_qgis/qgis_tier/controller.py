@@ -746,8 +746,12 @@ class Controller(QObject):
     # Sync events
 
     def _on_data_changed(self, project_id: str, layer_id: str) -> None:
+        cache = self.cache(project_id)
+        info = cache.table(layer_id)
         for layer in self._layers_of(project_id, layer_id):
             layer.reload()
+            if info is not None:
+                append_new_categories(layer, info, cache.categories())
             layer.triggerRepaint()
         self.changed.emit()
 

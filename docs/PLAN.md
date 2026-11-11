@@ -13,7 +13,7 @@ A QGIS plugin that shows the observations and tracks of a CoMapeo project as lay
 - QGIS and CoMapeo Desktop on the same machine, same operating-system user. macOS, Windows, Linux.
 - QGIS 3.44 (long-term release, Qt5) and 4.x (Qt6) from one codebase. Minimum 3.40.
 - Observations (points) and tracks (lines). Deleted documents left out. Observations with no location kept as rows without geometry.
-- Category icon per observation, category colour for tracks, applied as a default style on add and then left alone. Icons embedded in the QGIS project. "Reset to CoMapeo style" action.
+- Category icon per observation, category colour for tracks (the tracks legend lists only categories in use, since the protocol does not say which categories apply to tracks), applied as a default style on add and then left alone. Icons embedded in the QGIS project. "Reset to CoMapeo style" action.
 - One attribute column per field defined in the project's categories, plus a catch-all column of all tags, plus built-in columns.
 - A CoMapeo side panel: connection status, last updated, refresh, and the selected observation's photos (thumbnails, larger view) and audio.
 - A local cache per CoMapeo project in the QGIS user profile, so layers still show the last data fetched when the app is closed.
