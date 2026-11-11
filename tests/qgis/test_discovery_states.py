@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import os
 import shutil
-import tempfile
 
 import pytest
 from qgis.core import QgsBrowserModel
@@ -13,13 +12,14 @@ from qgis.PyQt.QtCore import QModelIndex
 
 from comapeo_qgis.plugin import CoMapeoPlugin
 from comapeo_qgis.qgis_tier.connection import NOT_RUNNING_MESSAGE, ServerState
+from tests.fake_server import short_tempdir
 from tests.qgis.conftest import process_events, use_discovery, wait_until
 from tests.qgis.test_browser_model import child_index
 
 
 @pytest.fixture
 def folder():
-    path = tempfile.mkdtemp(prefix="cq-disc-", dir="/tmp")
+    path = short_tempdir()
     yield path
     shutil.rmtree(path, ignore_errors=True)
 
