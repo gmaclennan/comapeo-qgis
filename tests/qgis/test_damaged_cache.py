@@ -139,10 +139,16 @@ def test_a_damaged_cache_is_rebuilt_when_connected_keeping_layers_and_style(
         )
         [tracks] = comapeo_map_layers("tracks")
         controller = plugin.controller
-        [aside] = wait_until(moved_aside, message="damaged cache set aside")
-        assert aside.startswith(os.path.basename(cache))
-        with open(os.path.join(cache_root(), aside), "rb") as f:
-            assert f.read() == damaged
+        # This file is still a GeoPackage, so the reopened layers hold it open, and
+        # Windows will not rename an open file: it is repaired in place instead.
+        in_place = kind == "no comapeo_meta" and os.name == "nt"
+        aside = []
+        if not in_place:
+            aside = wait_until(moved_aside, message="damaged cache set aside")
+            [name] = aside
+            assert name.startswith(os.path.basename(cache))
+            with open(os.path.join(cache_root(), name), "rb") as f:
+                assert f.read() == damaged
         wait_until(lambda: observations.isValid() and tracks.isValid(), timeout=30)
         wait_until(lambda: set(rows(observations)) == {"a", "b", "c"})
         wait_until(lambda: set(rows(tracks)) == {"t1"})
@@ -150,7 +156,7 @@ def test_a_damaged_cache_is_rebuilt_when_connected_keeping_layers_and_style(
         assert sqlite_error(cache) is None
         assert observations.renderer().dump() == styling["renderer"]
         assert observations.opacity() == styling["opacity"]
-        assert moved_aside() == [aside]
+        assert moved_aside() == aside
         assert controller.project_status("p1").error is None
 
         monkeypatch.setattr(
