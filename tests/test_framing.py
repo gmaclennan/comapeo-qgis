@@ -5,6 +5,7 @@ import pytest
 
 from comapeo_qgis.core.framing import (
     MAX_FRAME_SIZE,
+    MAX_JSON_DEPTH,
     FrameDecoder,
     FrameTooLarge,
     InvalidFrame,
@@ -84,15 +85,30 @@ def test_encoding_refuses_oversize_messages():
         encode_frame({"secret": "x" * 5000}, max_size=4096)
 
 
-def test_deeply_nested_json_is_refused_or_decoded_never_raised_raw():
-    # Python 3.14 parses this nesting; earlier versions hit RecursionError.
-    try:
-        [message] = FrameDecoder().feed(
-            raw_frame(("[" * 100_000 + "]" * 100_000).encode())
-        )
-    except InvalidFrame:
-        return
-    assert isinstance(message, list)
+def nested(depth: int) -> bytes:
+    return ("[" * (depth - 1) + "{}" + "]" * (depth - 1)).encode()
+
+
+def test_json_nested_beyond_the_limit_is_refused_on_every_python():
+    for depth in (MAX_JSON_DEPTH + 1, 100_000):
+        decoder = FrameDecoder()
+        with pytest.raises(InvalidFrame, match="deeper"):
+            decoder.feed(raw_frame(nested(depth)))
+        with pytest.raises(InvalidFrame):
+            decoder.feed(encode_frame({"id": 1}))
+
+
+def test_json_nested_to_the_limit_decodes():
+    [message] = FrameDecoder().feed(raw_frame(nested(MAX_JSON_DEPTH)))
+    for _ in range(MAX_JSON_DEPTH - 1):
+        [message] = message
+    assert message == {}
+
+
+def test_brackets_inside_strings_do_not_count_as_nesting():
+    text = '[\\"' + "[{" * MAX_JSON_DEPTH + '"]'
+    message = {"name": text, "tags": {"note": "]]}}" + "[" * 1000}}
+    assert FrameDecoder().feed(encode_frame(message)) == [message]
 
 
 def test_encoding_refuses_values_json_cannot_carry():

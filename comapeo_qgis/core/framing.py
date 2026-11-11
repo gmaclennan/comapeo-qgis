@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import struct
 from collections.abc import Iterator
 from typing import Any
@@ -10,8 +11,13 @@ from typing import Any
 HEADER_SIZE = 4
 HANDSHAKE_MAX_FRAME_SIZE = 4 * 1024
 MAX_FRAME_SIZE = 16 * 1024 * 1024
+# Far deeper than any message in the protocol, far shallower than Python's stack.
+MAX_JSON_DEPTH = 64
 
 _HEADER = struct.Struct("<I")
+_STRING = re.compile(rb'"[^"\\]*(?:\\.[^"\\]*)*"', re.DOTALL)
+_NOT_BRACKETS = bytes(range(256)).translate(None, b"[]{}")
+_PAIR = re.compile(rb"\[\]|\{\}")
 
 
 class FrameError(Exception):
@@ -69,6 +75,9 @@ class FrameDecoder:
                 return
             payload = bytes(self._buffer[HEADER_SIZE:end])
             del self._buffer[:end]
+            if _too_deep(payload):
+                self._failed = True
+                raise InvalidFrame(f"frame nests JSON deeper than {MAX_JSON_DEPTH}")
             try:
                 message = json.loads(payload.decode("utf-8"))
             except (UnicodeDecodeError, ValueError, RecursionError) as err:
@@ -79,3 +88,16 @@ class FrameDecoder:
     @property
     def buffered(self) -> int:
         return len(self._buffer)
+
+
+def _too_deep(payload: bytes) -> bool:
+    """Whether brackets outside strings nest beyond MAX_JSON_DEPTH, decided
+    before parsing so every Python version refuses the same frames."""
+    brackets = _STRING.sub(b"", payload).translate(None, _NOT_BRACKETS)
+    for _ in range(MAX_JSON_DEPTH):
+        if not brackets:
+            return False
+        brackets, removed = _PAIR.subn(b"", brackets)
+        if not removed:
+            return False
+    return bool(_PAIR.search(brackets))
