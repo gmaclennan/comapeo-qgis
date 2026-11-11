@@ -1,7 +1,7 @@
 """Starts the `@comapeo/local-api` dev server (`node src/dev/cli.ts`) for tests.
 
-Uses a sibling checkout, or COMAPEO_LOCAL_API_DIR, and Node 22.18+ (through
-fnm when available). `skip_reason()` says why it cannot run here.
+Uses a sibling checkout, or COMAPEO_LOCAL_API_DIR, and Node 22.18+ (COMAPEO_NODE,
+else fnm when available, else `node`). `skip_reason()` says why it cannot run here.
 """
 
 from __future__ import annotations
@@ -31,6 +31,8 @@ START_TIMEOUT = 120
 
 def node_command() -> list[str] | None:
     candidates = []
+    if os.environ.get("COMAPEO_NODE"):
+        candidates.append([os.environ["COMAPEO_NODE"]])
     if shutil.which("fnm"):
         candidates.append(["fnm", "exec", "--using=24", "node"])
     if shutil.which("node"):
@@ -131,20 +133,27 @@ class DevServer:
         try:
             self.proc.wait(timeout=15)
         except subprocess.TimeoutExpired:
-            for sig in (signal.SIGTERM, signal.SIGKILL):
-                with contextlib.suppress(ProcessLookupError):
-                    os.killpg(self.proc.pid, sig)
-                try:
-                    self.proc.wait(timeout=10)
-                    break
-                except subprocess.TimeoutExpired:
-                    continue
+            self._kill()
         self.reader.join(timeout=5)
         if self.proc.stdout is not None:
             self.proc.stdout.close()
         self.stderr.close()
         if self._owns_discovery_dir:
             shutil.rmtree(self.discovery_dir, ignore_errors=True)
+
+    def _kill(self) -> None:
+        if os.name != "posix":
+            self.proc.kill()
+            self.proc.wait(timeout=10)
+            return
+        for sig in (signal.SIGTERM, signal.SIGKILL):
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(self.proc.pid, sig)
+            try:
+                self.proc.wait(timeout=10)
+                return
+            except subprocess.TimeoutExpired:
+                continue
 
     def run(self, text: str) -> dict:
         """Run a stdin command (create, update, delete, category); parse its reply."""

@@ -355,6 +355,7 @@ def test_params_that_cannot_be_sent_are_a_client_error(params):
         struct.pack("<I", 9) + b"{not json",
         struct.pack("<I", 200_000) + ("[" * 100_000 + "]" * 100_000).encode(),
     ],
+    ids=["oversized", "not-json", "deep-nesting"],
 )
 def test_frames_before_a_bad_one_in_the_same_chunk_are_still_delivered(bad):
     conn, _ = ready_client(max_frame_size=1_000_000)
