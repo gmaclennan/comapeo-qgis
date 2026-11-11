@@ -16,7 +16,7 @@ from qgis.core import (
     QgsSettings,
     QgsVectorLayer,
 )
-from qgis.PyQt.QtCore import QObject, QTimer, pyqtSignal
+from qgis.PyQt.QtCore import QCoreApplication, QEvent, QObject, QTimer, pyqtSignal
 
 from ..core.media import MediaCache
 from ..core.model import (
@@ -352,6 +352,14 @@ class Controller(QObject):
         problem = None
         try:
             self.cache(project_id).remove()
+        except PermissionError:
+            # Windows refuses to delete an open file; the removed layers close it
+            # only when their deferred deletion runs.
+            QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+            try:
+                self.cache(project_id).remove()
+            except OSError as err:
+                problem = f"Could not delete the cached data: {err.strerror or err}"
         except OSError as err:
             problem = f"Could not delete the cached data: {err.strerror or err}"
         self._caches.pop(project_id, None)
