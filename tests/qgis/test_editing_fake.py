@@ -339,7 +339,8 @@ def test_member_may_change_only_its_own(fake, plugin, iface):
     wait_until(
         lambda: any(
             "Observation o2: created on another device; your role lets you change "
-            "only observations created on this device" in m
+            "only observations created on this device. Not saved: Notes = 'not mine'"
+            in m
             for m in plugin.log
         )
     )
@@ -499,13 +500,17 @@ def test_lost_replies_are_checked_once_connected_again(fake, plugin, iface):
     change(layer, "o3", "notes", "never arrived")
     assert layer.commitChanges()
     wait_until(
-        lambda: any("closed before confirming 2 changes" in m for m in plugin.log)
+        lambda: any(
+            "The connection to CoMapeo Desktop closed before it confirmed 2 changes."
+            in m
+            for m in plugin.log
+        )
     )
     wait_until(
-        lambda: any("were saved and" in m for m in plugin.log), message="checked"
+        lambda: any("had not confirmed" in m for m in plugin.log), message="checked"
     )
-    [checked] = [m for m in plugin.log if "were saved and" in m]
-    assert "1 were saved and 1 were not" in checked
+    [checked] = [m for m in plugin.log if "had not confirmed" in m]
+    assert "Of the 2 changes" in checked and "1 was saved and 1 was not" in checked
     assert "Observation o3 not saved: Notes = 'never arrived'" in checked
     assert "o2" not in checked
     assert served(fake, "o2")["properties"]["notes"] == "applied, reply lost"
@@ -611,6 +616,27 @@ def test_connection_lost_while_the_large_save_question_is_open(
     assert not layer.editBuffer().addedFeatures()
 
 
+def test_a_delete_that_another_write_overlapped_is_fetched_again(fake, plugin, iface):
+    layer = open_layer(fake, plugin)
+    fake.concurrent_next = "kept"
+    fake.quiet_next = True
+    assert layer.startEditing()
+    assert layer.deleteFeature(fid(layer, "o2"))
+    assert layer.commitChanges()
+    wait_until(
+        lambda: (
+            "o2" in rows(layer)
+            and plain(rows(layer)["o2"]["notes"]) == "written at the same moment"
+        ),
+        message="the observation CoMapeo kept",
+    )
+    assert any(
+        t.startswith("0 saved, 1 deletion met another change made at the same moment")
+        for t in iface.bar_texts()
+    ), iface.bar_texts()
+    wait_until(lambda: any("may still be there" in m for m in plugin.log))
+
+
 def test_a_moved_point_goes_back_at_once(fake, plugin):
     layer = open_layer(fake, plugin)
     before = rows(layer)["o1"].geometry().asWkt()
@@ -631,6 +657,31 @@ def test_a_moved_point_goes_back_at_once(fake, plugin):
     wait_until(lambda: rows(layer)["o3"].geometry().asWkt() != "Point (5 6)")
     assert layer.commitChanges()
     assert [e["params"]["id"] for e in fake.edits()] == ["o2"]
+
+
+def test_a_reply_that_fails_is_checked_at_once(fake, plugin, iface):
+    layer = open_layer(fake, plugin)
+    fake.fail_next("features.update", "INTERNAL_ERROR")
+    assert layer.startEditing()
+    change(layer, "o1", "notes", "never written")
+    assert layer.commitChanges()
+    wait_until(
+        lambda: any(
+            "CoMapeo Desktop did not confirm 1 change. The plugin is checking "
+            "whether it was saved." in m
+            for m in plugin.log
+        )
+    )
+    wait_until(
+        lambda: any(
+            "Of the 1 change CoMapeo Desktop had not confirmed, 0 were saved and 1 "
+            "was not."
+            in m
+            and "Notes = 'never written'" in m
+            for m in plugin.log
+        )
+    )
+    assert plain(rows(layer)["o1"]["notes"]) == "note o1"
 
 
 def test_role_removed_while_the_large_save_question_is_open(

@@ -41,6 +41,8 @@ INVALID_VALUE = "INVALID_VALUE"
 UNCONFIRMED_CODES = frozenset(
     {"TIMEOUT", "CONNECTION_CLOSED", "CLIENT_ERROR", "INTERNAL_ERROR"}
 )
+# Of those, the ones that mean the connection went.
+CLOSED_CODES = frozenset({"CONNECTION_CLOSED", "CLIENT_ERROR"})
 
 # The server accepts these, but the plugin's first cut leaves them read-only.
 PLUGIN_READ_ONLY_KINDS = (KIND_DATETIME, KIND_STRING_LIST, KIND_MAP)
@@ -389,20 +391,37 @@ def refusal_text(code: str, data: Any, labels: Mapping[str, str]) -> str:
     return f"refused ({code})"
 
 
-def summary_text(saved: int, refused: int, unconfirmed: int = 0) -> str:
-    if not refused and not unconfirmed:
-        if saved == 1:
-            return "1 change saved to CoMapeo."
-        return f"{saved} changes saved to CoMapeo."
-    parts = [f"{saved} saved", f"{refused} not saved"]
+def _many(count: int, word: str) -> str:
+    return f"{count} {word}{'s' if count != 1 else ''}"
+
+
+def summary_text(
+    saved: int, refused: int, unconfirmed: int = 0, *, overlapped: int = 0
+) -> str:
+    """`overlapped` counts deletions that met another write: until a fresh
+    fetch, it is not known whether they stood."""
+    if not refused and not unconfirmed and not overlapped:
+        return f"{_many(saved, 'change')} saved to CoMapeo."
+    parts = [f"{saved} saved"]
+    if refused or not overlapped:
+        parts.append(f"{refused} not saved")
     if unconfirmed:
         parts.append(f"{unconfirmed} not confirmed")
+    if overlapped:
+        parts.append(
+            f"{_many(overlapped, 'deletion')} met another change made at the "
+            "same moment"
+        )
     return ", ".join(parts) + ". The layer shows what CoMapeo holds."
 
 
 CONCURRENT_TEXT = (
     "Saved, but another change was made at the same moment. The layer shows "
     "the version CoMapeo kept."
+)
+CONCURRENT_DELETE_TEXT = (
+    "Another change was made at the same moment as a deletion, so the "
+    "observation may still be there. The layer shows what CoMapeo kept."
 )
 KEPT = "Your changes are still in the edit session."
 NOT_CONNECTED_TEXT = (
@@ -433,18 +452,28 @@ def busy_text(count: int) -> str:
     )
 
 
-def lost_text(count: int) -> str:
-    many = "s" if count != 1 else ""
+def lost_text(count: int, *, closed: bool) -> str:
+    """`closed`: the connection went; otherwise a reply timed out or failed."""
+    them = "it" if count == 1 else "them"
+    if closed:
+        return (
+            "The connection to CoMapeo Desktop closed before it confirmed "
+            f"{_many(count, 'change')}. The plugin checks {them} once it is "
+            "connected again."
+        )
+    they = "it was" if count == 1 else "they were"
     return (
-        f"CoMapeo Desktop closed before confirming {count} change{many}. The plugin "
-        "checks them once it is connected again."
+        f"CoMapeo Desktop did not confirm {_many(count, 'change')}. The plugin is "
+        f"checking whether {they} saved."
     )
 
 
 def checked_text(saved: int, missing: int) -> str:
+    was = "was" if saved == 1 else "were"
+    was_not = "was" if missing == 1 else "were"
     return (
-        f"Of the changes CoMapeo Desktop had not confirmed, {saved} were saved and "
-        f"{missing} were not."
+        f"Of the {_many(saved + missing, 'change')} CoMapeo Desktop had not "
+        f"confirmed, {saved} {was} saved and {missing} {was_not} not."
     )
 
 

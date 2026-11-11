@@ -30,6 +30,8 @@ from qgis.PyQt.QtCore import QDateTime, QObject, Qt, QTimer
 from qgis.PyQt.QtWidgets import QMessageBox
 
 from ..core.editing import (
+    CLOSED_CODES,
+    CONCURRENT_DELETE_TEXT,
     CONCURRENT_TEXT,
     CONFLICT,
     DELETE,
@@ -81,6 +83,8 @@ class _Save:
     answered: int = 0
     saved: int = 0
     concurrent: int = 0
+    overlapped: int = 0
+    closed: bool = False
     refused: list[tuple[EditRequest, str]] = field(default_factory=list)
     unconfirmed: list[EditRequest] = field(default_factory=list)
     rows: list[tuple[Any, str]] = field(default_factory=list)
@@ -623,12 +627,16 @@ class EditHook(QObject):
     def _take(self, save: _Save, request: EditRequest, result: Any, error: Any) -> None:
         doc_id = request.doc_id
         if error is None:
-            save.saved += 1
             if isinstance(result, dict) and result.get("concurrent") is True:
                 # Another write overlapped; only a fresh fetch says what stands.
-                save.concurrent += 1
+                if request.method == DELETE:
+                    save.overlapped += 1
+                else:
+                    save.saved += 1
+                    save.concurrent += 1
                 save.refetch.append(doc_id)
                 return
+            save.saved += 1
             if request.method == DELETE:
                 save.removed.append(doc_id)
                 return
@@ -641,6 +649,7 @@ class EditHook(QObject):
             return
         code = error.code
         if code in UNCONFIRMED_CODES:
+            save.closed = save.closed or code in CLOSED_CODES
             save.unconfirmed.append(request)
             save.refetch.append(doc_id)
             return
@@ -703,7 +712,11 @@ class EditHook(QObject):
             self.check_unconfirmed()
 
     def _report(self, save: _Save) -> None:
-        details = [f"{feature_label(r.doc_id)}: {text}" for r, text in save.refused]
+        details = [
+            f"{feature_label(r.doc_id)}: {text}. Not saved: "
+            + describe_request(r, save.labels)
+            for r, text in save.refused
+        ]
         details += save.discard_lines
         lost = len(save.unconfirmed)
         if lost:
@@ -715,15 +728,21 @@ class EditHook(QObject):
         if not save.requests:
             text = "Nothing was saved to CoMapeo."
         else:
-            text = summary_text(save.saved, len(save.refused), lost)
+            text = summary_text(
+                save.saved, len(save.refused), lost, overlapped=save.overlapped
+            )
+        if save.overlapped:
+            details.insert(0, CONCURRENT_DELETE_TEXT)
         if save.concurrent:
             details.insert(0, CONCURRENT_TEXT)
         level = Qgis.MessageLevel.Success
         if save.refused or lost or save.discard_lines or save.concurrent:
             level = Qgis.MessageLevel.Warning
+        if save.overlapped:
+            level = Qgis.MessageLevel.Warning
         self._notify(level, text, details)
         if lost:
-            self._notify(Qgis.MessageLevel.Warning, lost_text(lost))
+            self._notify(Qgis.MessageLevel.Warning, lost_text(lost, closed=save.closed))
 
     def check_unconfirmed(self) -> None:
         """Once connected again, find out which unconfirmed edits landed."""

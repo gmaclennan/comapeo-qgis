@@ -6,8 +6,10 @@ from comapeo_qgis.core.editing import (
     EditRequest,
     RowBase,
     RowChange,
+    checked_text,
     discard_messages,
     landed,
+    lost_text,
     plan_save,
     read_only_message,
     refusal_text,
@@ -314,6 +316,36 @@ def test_summary():
     assert summary_text(1, 0) == "1 change saved to CoMapeo."
     assert summary_text(3, 2) == (
         "3 saved, 2 not saved. The layer shows what CoMapeo holds."
+    )
+    assert summary_text(0, 0, overlapped=1) == (
+        "0 saved, 1 deletion met another change made at the same moment. "
+        "The layer shows what CoMapeo holds."
+    )
+    assert summary_text(2, 1, 1, overlapped=2) == (
+        "2 saved, 1 not saved, 1 not confirmed, 2 deletions met another change "
+        "made at the same moment. The layer shows what CoMapeo holds."
+    )
+
+
+def test_unconfirmed_changes_in_words():
+    assert lost_text(1, closed=True) == (
+        "The connection to CoMapeo Desktop closed before it confirmed 1 change. "
+        "The plugin checks it once it is connected again."
+    )
+    assert lost_text(2, closed=False) == (
+        "CoMapeo Desktop did not confirm 2 changes. The plugin is checking "
+        "whether they were saved."
+    )
+    assert checked_text(1, 0) == (
+        "Of the 1 change CoMapeo Desktop had not confirmed, 1 was saved and 0 were not."
+    )
+    assert checked_text(1, 2) == (
+        "Of the 3 changes CoMapeo Desktop had not confirmed, 1 was saved and 2 "
+        "were not."
+    )
+    assert checked_text(2, 1) == (
+        "Of the 3 changes CoMapeo Desktop had not confirmed, 2 were saved and 1 "
+        "was not."
     )
 
 
