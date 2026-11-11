@@ -75,14 +75,19 @@ class FrameDecoder:
                 return
             payload = bytes(self._buffer[HEADER_SIZE:end])
             del self._buffer[:end]
-            if _too_deep(payload):
-                self._failed = True
-                raise InvalidFrame(f"frame nests JSON deeper than {MAX_JSON_DEPTH}")
+            too_deep = InvalidFrame(f"frame nests JSON deeper than {MAX_JSON_DEPTH}")
             try:
                 message = json.loads(payload.decode("utf-8"))
-            except (UnicodeDecodeError, ValueError, RecursionError) as err:
+            except RecursionError as err:
+                self._failed = True
+                raise too_deep from err
+            except (UnicodeDecodeError, ValueError) as err:
                 self._failed = True
                 raise InvalidFrame(f"frame is not UTF-8 JSON: {err}") from err
+            # Only after parsing: the string pattern is slow on unterminated strings.
+            if _too_deep(payload):
+                self._failed = True
+                raise too_deep
             yield message
 
     @property
@@ -91,8 +96,8 @@ class FrameDecoder:
 
 
 def _too_deep(payload: bytes) -> bool:
-    """Whether brackets outside strings nest beyond MAX_JSON_DEPTH, decided
-    before parsing so every Python version refuses the same frames."""
+    """Whether brackets outside strings nest beyond MAX_JSON_DEPTH, so that
+    Python versions that parse deeper JSON refuse the same frames as the rest."""
     brackets = _STRING.sub(b"", payload).translate(None, _NOT_BRACKETS)
     for _ in range(MAX_JSON_DEPTH):
         if not brackets:

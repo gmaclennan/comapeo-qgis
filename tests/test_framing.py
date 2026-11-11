@@ -1,5 +1,6 @@
 import json
 import struct
+import time
 
 import pytest
 
@@ -103,6 +104,14 @@ def test_json_nested_to_the_limit_decodes():
     for _ in range(MAX_JSON_DEPTH - 1):
         [message] = message
     assert message == {}
+
+
+def test_an_unterminated_string_of_escapes_is_refused_quickly():
+    for tail in (b"", b"\\"):
+        started = time.monotonic()
+        with pytest.raises(InvalidFrame, match="not UTF-8 JSON"):
+            FrameDecoder().feed(raw_frame(b'["' + b'\\"' * 200_000 + tail))
+        assert time.monotonic() - started < 2
 
 
 def test_brackets_inside_strings_do_not_count_as_nesting():
