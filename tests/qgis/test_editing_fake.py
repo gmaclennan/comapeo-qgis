@@ -24,7 +24,7 @@ from comapeo_qgis.qgis_tier import editing
 from comapeo_qgis.qgis_tier.qt_compat import meta_type
 from tests.fake_server import FakeProject, FakeServer, observation, track
 from tests.qgis.conftest import pump, record_messages, use_discovery, wait_until
-from tests.qgis.helpers import grey_rows, plain, rows, table_view
+from tests.qgis.helpers import badges, grey_rows, panel_row, plain, rows, table_view
 
 DOCS = ["o1", "o2", "o3", "o4"]
 
@@ -289,8 +289,8 @@ def test_old_server_reads_as_read_only(plugin):
         allowed, message, _ = controller.edit_state(layer)
         assert not allowed
         assert message == (
-            "This version of CoMapeo Desktop cannot be edited from QGIS. "
-            "Update CoMapeo Desktop."
+            "This version of CoMapeo Desktop does not support editing from QGIS. "
+            "Update CoMapeo Desktop to edit observations."
         )
     finally:
         server.stop()
@@ -434,6 +434,39 @@ def test_editing_switched_off_mid_session_keeps_the_edits(fake, plugin, iface):
     assert fake.edits() == []
     layer.rollBack()
     wait_until(lambda: layer.readOnly(), message="read-only once the session ends")
+
+
+def test_the_reason_a_layer_is_read_only_follows_the_app(fake, plugin, iface):
+    layer = open_layer(fake, plugin)
+    tracks = plugin.controller.add_layer("p1", "tracks")
+    wait_until(lambda: badges(iface, tracks) == ["Tracks cannot be edited from QGIS."])
+    assert badges(iface, layer) == []
+    assert panel_row(plugin, "p1").startswith("Up to date")
+    assert "edit" not in panel_row(plugin, "p1")
+
+    def shows(text):
+        wait_until(lambda: badges(iface, layer) == [text], message=text)
+        wait_until(lambda: panel_row(plugin, "p1").endswith(text), message=text)
+        assert layer.readOnly()
+
+    fake.allow_edits = False
+    fake.drop_connections()
+    shows("Editing from QGIS is switched off in CoMapeo Desktop.")
+    fake.allow_edits = None
+    fake.drop_connections()
+    shows(
+        "This version of CoMapeo Desktop does not support editing from QGIS. "
+        "Update CoMapeo Desktop to edit observations."
+    )
+    fake.allow_edits = True
+    fake.role = "blocked"
+    fake.drop_connections()
+    shows("Your role in this project does not allow editing.")
+    fake.role = "coordinator"
+    fake.notify("layer.schemaChanged", {"projectId": "p1", "layerId": "observations"})
+    wait_until(lambda: not layer.readOnly(), message="editable again")
+    wait_until(lambda: badges(iface, layer) == [])
+    wait_until(lambda: "edit" not in panel_row(plugin, "p1"))
 
 
 def test_role_taken_away_mid_session_keeps_the_edits(fake, plugin, iface):
