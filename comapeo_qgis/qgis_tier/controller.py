@@ -664,7 +664,11 @@ class Controller(QObject):
                 self._origins[project_id] = build_type
             self._gone.discard(project_id)
             cache = self.cache(project_id)
-            moved = serving and cache.exists and cache.build_type() != build_type
+            build = cache.build_type() if cache.exists else None
+            # Under a lock the build is unknown, not different; writing would wait.
+            moved = (
+                serving and cache.exists and not cache.locked and build != build_type
+            )
             # Before writing: metadata written into a damaged file would hide it.
             if full or new or renamed or moved:
                 self._set_aside_if_damaged(project_id)
@@ -823,6 +827,7 @@ class Controller(QObject):
         """The last project read from the file while another program locks it."""
         for cache in self._caches.values():
             if cache.path == path and cache.project() is not None:
+                self._locked_files.discard(path)
                 return cache.project()
         try:
             project = project_in_file(path)

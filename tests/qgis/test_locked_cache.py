@@ -13,7 +13,9 @@ from qgis.core import QgsProject
 from qgis.PyQt.QtCore import QTimer
 
 from comapeo_qgis.plugin import CoMapeoPlugin
+from comapeo_qgis.qgis_tier import cache as cache_module
 from comapeo_qgis.qgis_tier import controller as controller_module
+from comapeo_qgis.qgis_tier import sync as sync_module
 from tests.fake_server import FakeProject, FakeServer, observation, track
 from tests.qgis.conftest import pump, use_discovery, wait_until
 from tests.qgis.helpers import comapeo_map_layers, held_lock, rows
@@ -247,5 +249,58 @@ def test_a_live_update_that_meets_another_writer_arrives_once_it_is_done(iface, 
         fake.notify("layer.changed", changed)
         wait_until(lambda: set(rows(observations)) == {"a", "b", "c", "e"})
         assert panel_text(plugin).startswith("Up to date")
+    finally:
+        plugin.unload()
+
+
+def test_once_a_locked_cache_is_read_the_panel_stops_looking_again(
+    iface, fake, folder, monkeypatch
+):
+    monkeypatch.setattr(controller_module, "PROJECT_POLL_MS", 100)
+    project_file, cache, _styling = save_project_with_layers(iface, fake, folder)
+    fake.stop()
+    plugin = CoMapeoPlugin(iface)
+    try:
+        with held_lock(cache):
+            plugin.initGui()
+            assert QgsProject.instance().read(project_file)
+            pump(300)
+        wait_until(
+            lambda: panel_text(plugin).startswith("Not connected. Showing data cached")
+        )
+        pump(300)
+        # Each discovery scan reports the connections; nothing else should change.
+        changes, scans = [], []
+        plugin.controller.changed.connect(lambda: changes.append(1))
+        plugin.controller.connector.statusChanged.connect(lambda: scans.append(1))
+        pump(1000)
+        assert len(changes) == len(scans)
+    finally:
+        plugin.unload()
+
+
+def test_a_poll_does_not_wait_on_a_cache_another_program_locks(
+    iface, fake, folder, monkeypatch
+):
+    monkeypatch.setattr(controller_module, "PROJECT_POLL_MS", 200)
+    monkeypatch.setattr(cache_module, "WRITE_WAIT_S", 1.0)
+    monkeypatch.setattr(sync_module, "LOCK_RETRY_MS", 60_000)
+    project_file, cache, _styling = save_project_with_layers(iface, fake, folder)
+    plugin = CoMapeoPlugin(iface)
+    try:
+        with held_lock(cache):
+            plugin.initGui()
+            assert QgsProject.instance().read(project_file)
+            controller = plugin.controller
+            wait_until(lambda: controller.connected, message="connected")
+            wait_until(
+                lambda: "another program" in panel_text(plugin).lower(),
+                message="the lock reported",
+            )
+            pump(300)
+            stalls = Stalls()
+            pump(1500)
+            longest = stalls.stop()
+            assert longest < 0.5, longest
     finally:
         plugin.unload()
