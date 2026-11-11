@@ -61,7 +61,7 @@ Saving sends each changed observation to CoMapeo Desktop, which checks it and an
 
 A CoMapeo Desktop that predates editing leaves the layers read-only, and the plugin says to update it.
 
-`scripts/smoke-e2e.sh --edit` checks editing in a real QGIS window against the dev server (screenshots prefixed `edit-`).
+`scripts/smoke-e2e.sh --edit` checks editing in a real QGIS window against the dev server (screenshots prefixed `edit-`). `scripts/desktop-smoke.mjs --edit` does the same against a packaged CoMapeo Desktop: the layer is read-only with only "Allow QGIS to Connect", then "Allow QGIS to Edit Observations" is ticked in desktop's Settings and the plugin reconnects by itself; a field and the notes are changed and read back in desktop's observation screen, a save is refused after desktop changed the observation meanwhile, an observation is deleted and one given another category, a move is undone, and unticking the setting leaves the layer read-only again (files prefixed `desktop-edit-`).
 
 ## Licence
 

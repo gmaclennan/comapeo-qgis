@@ -3,12 +3,16 @@
 Adapted from scripts/smoke_in_qgis.py; started by scripts/desktop-smoke.mjs
 with --code. The live run adds layers through the Browser, waits for an
 observation created in desktop, then waits for desktop to quit and for the layers
-to read as stale. Settings come from COMAPEO_SMOKE_* environment variables.
+to read as stale. With COMAPEO_SMOKE_EDIT (targets the driver picked) it edits
+the observations layer before desktop quits, asking the driver through files in
+the work folder to change desktop's settings and read observations back there.
+Settings come from COMAPEO_SMOKE_* environment variables.
 Never raises: every failure ends in the report.
 """
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import sys
@@ -22,7 +26,11 @@ from qgis.core import (
     QgsApplication,
     QgsCategorizedSymbolRenderer,
     QgsCoordinateTransform,
+    QgsExpression,
+    QgsFeatureRequest,
+    QgsGeometry,
     QgsLayerTreeLayer,
+    QgsPointXY,
     QgsProject,
     QgsRectangle,
     QgsVectorLayer,
@@ -31,7 +39,7 @@ from qgis.gui import QgsBrowserTreeView
 from qgis.PyQt.QtCore import QEventLoop, QPoint, Qt, QTimer
 from qgis.PyQt.QtGui import QColor
 from qgis.PyQt.QtTest import QTest
-from qgis.PyQt.QtWidgets import QDockWidget
+from qgis.PyQt.QtWidgets import QDockWidget, QWidget
 from qgis.utils import iface, plugins
 
 PLUGIN = "comapeo_qgis"
@@ -41,6 +49,7 @@ MODE = os.environ.get("COMAPEO_SMOKE_MODE", "live")
 PREFIX = os.environ.get("COMAPEO_SMOKE_PREFIX", "smoke")
 PROJECT_ID = os.environ.get("COMAPEO_SMOKE_PROJECT", "")
 TIMEOUT = float(os.environ.get("COMAPEO_SMOKE_STEP_TIMEOUT", "90"))
+EDIT_TARGETS = json.loads(os.environ.get("COMAPEO_SMOKE_EDIT", "{}"))
 SCRUB = [(str(WORK), "<work>")] + [
     (p, "~") for p in (os.environ.get("COMAPEO_SMOKE_REAL_HOME"), str(Path.home())) if p
 ]
@@ -560,6 +569,9 @@ def run_live() -> None:
     report["layersAfterUpdate"] = [describe_layer(layer) for layer in comapeo_layers()]
     report["statusAfterUpdate"] = status_report()
     show_new_observation(doc_id, full)
+    if EDIT_TARGETS:
+        run_editing()
+        render_canvas(full)
     write_json(WORK / "phase2.json", report)
 
     step("waiting for desktop to quit")
@@ -605,6 +617,338 @@ def show_new_observation(doc_id: str, full: QgsRectangle) -> None:
     report["images"].append(save_canvas("canvas-new-observation"))
     report["images"].append(save_window("new-observation-window"))
     layer.removeSelection()
+
+
+# Editing, between the live update and desktop quitting
+
+DISABLED_TEXT = "Editing from QGIS is switched off in CoMapeo Desktop."
+SHOWN: list[dict[str, str]] = []
+
+
+def ask_driver(name: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    done = WORK / f"{name}-done.json"
+    done.unlink(missing_ok=True)
+    write_json(WORK / f"{name}.json", payload or {})
+    wait_until(done.exists, f"the driver to do {name}", 240)
+    return json.loads(done.read_text(encoding="utf-8"))
+
+
+def bar_texts() -> list[str]:
+    return [item.text() for item in iface.messageBar().items()]
+
+
+def observations_layer() -> QgsVectorLayer:
+    found = layer_by_id("observations")
+    if found is None:
+        raise RuntimeError("the observations layer is gone")
+    return found
+
+
+def private_field(role: str) -> str:
+    return plugin().controller.cache(PROJECT_ID).table("observations").field(role)
+
+
+def feature_of(doc_id: str, provider: bool = False) -> Any:
+    found = observations_layer()
+    expression = QgsExpression(f"\"{private_field('doc_id')}\" = '{doc_id}'")
+    source = found.dataProvider() if provider else found
+    return next(source.getFeatures(QgsFeatureRequest(expression)), None)
+
+
+def fid(doc_id: str) -> int:
+    feature = feature_of(doc_id)
+    if feature is None:
+        raise RuntimeError(f"observation {doc_id} is not on the layer")
+    return feature.id()
+
+
+def row_state(doc_id: str) -> dict[str, Any] | None:
+    """What the layer shows for an observation and what the cache holds."""
+    shown = feature_of(doc_id)
+    cached = feature_of(doc_id, provider=True)
+    if shown is None and cached is None:
+        return None
+    result: dict[str, Any] = {}
+    for name, feature in (("layer", shown), ("cache", cached)):
+        if feature is None:
+            result[name] = None
+            continue
+        values = {
+            field.name(): feature[field.name()]
+            for field in feature.fields()
+            if field.name() in EDIT_TARGETS["columns"]
+        }
+        point = feature.geometry().asPoint() if feature.hasGeometry() else None
+        values["@version"] = feature[private_field("version")]
+        values["@forks"] = feature[private_field("forks")]
+        values["@categoryId"] = feature[private_field("category_id")]
+        values["@point"] = [point.x(), point.y()] if point is not None else None
+        result[name] = values
+    return result
+
+
+def where_shown(text: str) -> list[str]:
+    """Places in the window where a user could read this text."""
+    found = [f"message bar: {t}" for t in bar_texts() if text in t]
+    for widget in iface.mainWindow().findChildren(QWidget):
+        if not widget.isVisible():
+            continue
+        for getter in ("text", "toolTip", "statusTip", "toPlainText"):
+            method = getattr(widget, getter, None)
+            value = None
+            with contextlib.suppress(Exception):
+                value = method() if callable(method) else None
+            if isinstance(value, str) and text in value:
+                found.append(f"{type(widget).__name__}.{getter}")
+    view = iface.layerTreeView()
+    node = QgsProject.instance().layerTreeRoot().findLayer(observations_layer().id())
+    if node is not None:
+        model = view.layerTreeModel()
+        tip = model.data(model.node2index(node), Qt.ItemDataRole.ToolTipRole)
+        if isinstance(tip, str) and text in tip:
+            found.append("layer tree tooltip")
+        for indicator in view.indicators(node):
+            if text in indicator.toolTip():
+                found.append("layer tree badge")
+    return found
+
+
+def edit_reason() -> str | None:
+    return plugin().controller.edit_state(observations_layer())[1]
+
+
+def save_edits(name: str) -> dict[str, Any]:
+    """Save Layer Edits, as the toolbar button does; what QGIS then shows."""
+    iface.messageBar().clearWidgets()
+    seen = len(SHOWN)
+    iface.setActiveLayer(observations_layer())
+    iface.actionSaveActiveLayerEdits().trigger()
+    with contextlib.suppress(TimeoutError):
+        wait_until(lambda: len(SHOWN) > seen, f"a message after saving {name}", 30)
+    pump(800)
+    found = observations_layer()
+    result = {
+        "bar": bar_texts(),
+        "shown": SHOWN[seen:],
+        "stillModified": found.isModified(),
+        "editable": found.isEditable(),
+    }
+    report["edit"]["saves"][name] = result
+    return result
+
+
+def run_editing() -> None:
+    controller = plugin().controller
+    controller.messageShown.connect(
+        lambda _level, text, details: SHOWN.append({"text": text, "details": details})
+    )
+    edit: dict[str, Any] = {"saves": {}, "shown": SHOWN}
+    report["edit"] = edit
+    targets = EDIT_TARGETS
+    iface.messageBar().clearWidgets()
+
+    step("editing: read-only with only the first setting")
+    layer = observations_layer()
+    iface.setActiveLayer(layer)
+    pump(300)
+    reason = edit_reason()
+    edit["readOnly"] = {
+        "readOnly": layer.readOnly(),
+        "reason": reason,
+        "toggleEditingEnabled": iface.actionToggleEditing().isEnabled(),
+    }
+    seen = len(SHOWN)
+    iface.actionToggleEditing().trigger()
+    pump(800)
+    edit["readOnly"]["afterToggleEditing"] = {
+        "editable": layer.isEditable(),
+        "bar": bar_texts(),
+        "shown": SHOWN[seen:],
+    }
+    if layer.isEditable():
+        layer.rollBack()
+    edit["readOnly"]["reasonVisibleIn"] = where_shown(reason) if reason else []
+    report["images"].append(save_window("edit-read-only-window"))
+
+    step("editing: second setting ticked in desktop")
+    started = time.monotonic()
+    edit["tick"] = ask_driver("tick")
+    tick_timeline = edit["tickTimeline"] = []
+
+    def editable() -> bool:
+        state = [
+            observations_layer().readOnly(),
+            edit_reason(),
+            [s.state.value for s in controller.server_statuses],
+        ]
+        if not tick_timeline or tick_timeline[-1][1:] != state:
+            tick_timeline.append([round(time.monotonic() - started, 2), *state])
+        return not observations_layer().readOnly()
+
+    wait_until(editable, "an editable layer", 120)
+    edit["editableAfterSeconds"] = round(time.monotonic() - started, 2)
+    edit["statusAfterTick"] = status_report()
+    report["images"].append(save_window("edit-editable-window"))
+
+    step("editing: a field and the notes")
+    layer = observations_layer()
+    iface.setActiveLayer(layer)
+    iface.actionToggleEditing().trigger()
+    pump(300)
+    edit["editingStarted"] = layer.isEditable()
+    fields = layer.fields()
+    notes = fields.indexOf(targets["notesColumn"])
+    field = targets["field"]
+    doc = field["docId"]
+    edit["fieldBefore"] = row_state(doc)
+    layer.changeAttributeValue(
+        fid(doc), fields.indexOf(field["column"]), field["value"]
+    )
+    layer.changeAttributeValue(fid(doc), notes, targets["notes"])
+    edit["fieldBuffered"] = row_state(doc)
+    report["images"].append(save_window("edit-field-before-save-window"))
+    save_edits("field")
+    edit["fieldAfter"] = row_state(doc)
+    report["images"].append(save_window("edit-field-saved-window"))
+    edit["fieldDesktop"] = ask_driver(
+        "look",
+        {
+            "docId": doc,
+            "shot": "field-saved",
+            "texts": [targets["notes"], field["shownAs"]],
+        },
+    )
+
+    step("editing: a stale save")
+    stale = targets["stale"]
+    layer = observations_layer()
+    edit["staleBefore"] = row_state(stale)
+    layer.changeAttributeValue(fid(stale), notes, targets["staleNotes"])
+    edit["staleDesktop"] = ask_driver("stale", {"docId": stale})
+    pump(2000)
+    edit["staleHeld"] = row_state(stale)
+    save_edits("stale")
+    desktop_notes = targets["desktopNotes"]
+
+    def shows_desktop() -> bool:
+        state = row_state(stale)
+        return bool(
+            state
+            and state["layer"]
+            and state["layer"].get(targets["notesColumn"]) == desktop_notes
+        )
+
+    with contextlib.suppress(TimeoutError):
+        wait_until(shows_desktop, "the layer to show desktop's notes", 30)
+    edit["staleAfter"] = row_state(stale)
+    edit["staleModifiedAfter"] = observations_layer().isModified()
+    report["images"].append(save_window("edit-stale-refused-window"))
+    edit["staleOracle"] = ask_driver(
+        "look", {"docId": stale, "shot": "stale-after", "texts": [desktop_notes]}
+    )
+
+    step("editing: a delete")
+    deleted = targets["delete"]
+    observations_layer().deleteFeature(fid(deleted))
+    save_edits("delete")
+    edit["deletedStillShown"] = feature_of(deleted) is not None
+    edit["deletedInCache"] = feature_of(deleted, provider=True) is not None
+    edit["deleteDesktop"] = ask_driver(
+        "look", {"docId": deleted, "shot": "deleted", "texts": []}
+    )
+
+    step("editing: a category change")
+    category = targets["category"]
+    category_field = private_field("category_id")
+    edit["categoryBefore"] = row_state(category["docId"])
+    edit["categoryTried"] = []
+    for candidate in category["candidates"]:
+        observations_layer().changeAttributeValue(
+            fid(category["docId"]),
+            observations_layer().fields().indexOf(category_field),
+            candidate["categoryId"],
+        )
+        result = save_edits(f"category-{len(edit['categoryTried'])}")
+        state = row_state(category["docId"])
+        landed = bool(
+            state and state["cache"]["@categoryId"] == candidate["categoryId"]
+        )
+        edit["categoryTried"].append({**candidate, "landed": landed, "bar": result})
+        if landed:
+            edit["categoryChosen"] = candidate
+            break
+    edit["categoryAfter"] = row_state(category["docId"])
+    chosen = edit.get("categoryChosen")
+    edit["categoryDesktop"] = ask_driver(
+        "look",
+        {
+            "docId": category["docId"],
+            "shot": "category-saved",
+            "texts": [chosen["name"]] if chosen else [],
+        },
+    )
+
+    step("editing: a move")
+    moved = targets["move"]
+    edit["moveBefore"] = row_state(moved)
+    point = feature_of(moved).geometry().asPoint()
+    seen = len(SHOWN)
+    observations_layer().changeGeometry(
+        fid(moved),
+        QgsGeometry.fromPointXY(QgsPointXY(point.x() + 0.05, point.y() + 0.05)),
+    )
+    pump(500)
+    edit["moveAfter"] = row_state(moved)
+    edit["moveLeftModified"] = observations_layer().isModified()
+    edit["moveShown"] = SHOWN[seen:]
+    report["images"].append(save_window("edit-move-undone-window"))
+    edit["moveDesktop"] = ask_driver(
+        "look", {"docId": moved, "shot": "moved", "texts": []}
+    )
+
+    step("editing: second setting unticked in desktop")
+    layer = observations_layer()
+    if layer.isModified():
+        edit["leftoverEdits"] = True
+        layer.rollBack()
+    iface.setActiveLayer(layer)
+    iface.actionToggleEditing().trigger()
+    pump(300)
+    edit["editingStopped"] = not observations_layer().isEditable()
+    count = observations_layer().featureCount()
+    layer_id = observations_layer().id()
+    started = time.monotonic()
+    edit["untick"] = ask_driver("untick")
+
+    timeline = edit["untickTimeline"] = []
+
+    def read_only_again() -> bool:
+        found = layer_by_id("observations")
+        state = [
+            bool(found and found.readOnly()),
+            edit_reason() if found else None,
+            [s.state.value for s in controller.server_statuses],
+        ]
+        if not timeline or timeline[-1][1:] != state:
+            timeline.append([round(time.monotonic() - started, 2), *state])
+        return bool(found and found.readOnly() and edit_reason() == DISABLED_TEXT)
+
+    wait_until(read_only_again, "the layer to read as read-only again", 120)
+    edit["readOnlyAgainSeconds"] = round(time.monotonic() - started, 2)
+    pump(1000)
+    layer = observations_layer()
+    edit["afterUntick"] = {
+        "sameMapLayer": layer.id() == layer_id,
+        "valid": layer.isValid(),
+        "readOnly": layer.readOnly(),
+        "reason": edit_reason(),
+        "featureCountBefore": count,
+        "featureCount": layer.featureCount(),
+        "featuresIterated": sum(1 for _ in layer.getFeatures()),
+        "status": status_report(),
+    }
+    report["images"].append(save_window("edit-read-only-again-window"))
+    iface.messageBar().clearWidgets()
 
 
 # Offline run: reopen the saved project with the app closed
@@ -656,6 +1000,10 @@ def main() -> None:
         finally:
             # As a user quits; QgsApplication.exit() here crashed QGIS during teardown.
             QgsProject.instance().setDirty(False)
+            # Unsaved edits left by a failed step would hold the quit at a question.
+            for layer in comapeo_layers():
+                if layer.isEditable():
+                    layer.rollBack()
             iface.actionExit().trigger()
 
 
