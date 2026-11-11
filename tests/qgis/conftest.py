@@ -14,7 +14,8 @@ from typing import Any
 import pytest
 from qgis.core import QgsApplication, QgsLayerTreeModel, QgsProject, QgsSettings
 from qgis.gui import QgsLayerTreeView, QgsMapCanvas
-from qgis.PyQt.QtCore import QEventLoop, Qt, QTimer
+from qgis.PyQt.QtCore import QEventLoop, QObject, Qt, QTimer, QUrl, pyqtSlot
+from qgis.PyQt.QtGui import QDesktopServices
 from qgis.PyQt.QtWidgets import QDockWidget, QMainWindow, QMenu, QToolBar
 from qgis.testing import start_app
 
@@ -176,16 +177,18 @@ def cache_root() -> Path:
 
 @pytest.fixture(autouse=True)
 def clean_state() -> Iterator[None]:
-    """Each test starts with an empty project and cache, and by default finds no
+    """Each test starts with an empty project and caches, and by default finds no
     app: discovery points at an empty folder, never at a real CoMapeo Desktop."""
     QgsProject.instance().clear()
     shutil.rmtree(cache_root(), ignore_errors=True)
+    shutil.rmtree(cache_root().parent / "media", ignore_errors=True)
     empty = tempfile.mkdtemp(prefix="cq-none-")
     use_discovery(empty)
     yield
     QgsProject.instance().clear()
     process_events()
     shutil.rmtree(cache_root(), ignore_errors=True)
+    shutil.rmtree(cache_root().parent / "media", ignore_errors=True)
     shutil.rmtree(empty, ignore_errors=True)
     QgsSettings().remove(DISCOVERY_SETTING)
 
@@ -199,3 +202,22 @@ def server_or_skip(**kwargs: Any) -> dev.DevServer:
     if reason:
         pytest.skip(reason)
     return dev.start(**kwargs)
+
+
+class _Opened(QObject):
+    def __init__(self) -> None:
+        super().__init__()
+        self.paths: list[Path] = []
+
+    @pyqtSlot(QUrl)
+    def handle(self, url: QUrl) -> None:
+        self.paths.append(Path(url.toLocalFile()))
+
+
+@pytest.fixture
+def opened() -> Iterator[list[Path]]:
+    """Files the plugin asks the system to open; nothing is launched."""
+    handler = _Opened()
+    QDesktopServices.setUrlHandler("file", handler, "handle")
+    yield handler.paths
+    QDesktopServices.unsetUrlHandler("file")

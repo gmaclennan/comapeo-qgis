@@ -22,8 +22,10 @@ from qgis.PyQt.QtCore import QObject, QTimer, pyqtSignal
 
 from ..core.media import MediaCache
 from ..core.model import (
+    Attachment,
     LayerDefinition,
     Project,
+    parse_attachments,
     parse_categories,
     parse_layers,
     parse_projects,
@@ -49,6 +51,7 @@ from .layers import (
     point_at,
     project_group,
 )
+from .media import MediaDownload, MediaFetcher
 from .style import (
     append_new_categories,
     apply_default_style,
@@ -109,12 +112,15 @@ def default_lang() -> str | None:
 class Controller(QObject):
     """`changed` fires whenever anything the panel or Browser shows may differ.
 
-    `selectionChanged(project_id, layer_id, doc_ids)` is the seam for the media
-    panel (milestone 4): it fires when the selection on a CoMapeo layer changes.
+    `selectionChanged(project_id, layer_id, doc_ids)` fires when the selection on
+    a CoMapeo layer changes. `mediaRetry` fires when media that was not yet
+    synced should be fetched again (Refresh, or an app connecting).
     """
 
     changed = pyqtSignal()
     selectionChanged = pyqtSignal(str, str, list)
+    mediaRetry = pyqtSignal()
+    downloadsChanged = pyqtSignal()
 
     def __init__(
         self,
@@ -146,6 +152,10 @@ class Controller(QObject):
         self._project_signals: list[tuple[Any, Callable[..., Any]]] = []
         self._started = False
         self.list_errors: dict[str, str] = {}
+        self.last_download: tuple[str, Any] | None = None
+        self.media = MediaCache(self.cache_root.parent / "media")
+        self.fetcher = MediaFetcher(self.media, self)
+        self._downloads: dict[str, MediaDownload] = {}
         # The protocol has no notification for projects joined or left.
         self._poll = QTimer(self)
         self._poll.timeout.connect(self._poll_projects)
@@ -167,7 +177,7 @@ class Controller(QObject):
             signal.connect(slot)
             self._project_signals.append((signal, slot))
         with contextlib.suppress(OSError):
-            MediaCache(self.cache_root.parent / "media").remove_partial_files()
+            self.media.remove_partial_files()
         self._on_layers_added(list(self.project.mapLayers().values()))
         self.connector.start()
         self._poll.start(PROJECT_POLL_MS)
@@ -177,6 +187,9 @@ class Controller(QObject):
             return
         self._started = False
         self._poll.stop()
+        for download in list(self._downloads.values()):
+            download.cancel()
+        self.fetcher.abort_all()
         for signal, slot in self._project_signals:
             with contextlib.suppress(TypeError, RuntimeError):
                 signal.disconnect(slot)
@@ -290,6 +303,98 @@ class Controller(QObject):
         self.connector.scan()
         for build_type, client in self.connector.ready_clients().items():
             self._list_projects(build_type, client)
+        self._retry_media()
+
+    def _retry_media(self) -> None:
+        self.media.retry_not_synced()
+        self.mediaRetry.emit()
+
+    # Media
+
+    def media_client(self, project_id: str) -> LocalApiClient | None:
+        """The connection to the app serving this project, if it is ready."""
+        build_type = self._served.get(project_id)
+        client = self.connector.client(build_type) if build_type else None
+        return client if client is not None and client.is_ready else None
+
+    def cached_attachments(
+        self, project_id: str, layer_id: str, doc_id: str
+    ) -> tuple[Attachment, ...] | None:
+        cache = self.cache(project_id)
+        info = cache.table(layer_id) if cache.exists else None
+        return cache.attachments(info, doc_id) if info is not None else None
+
+    def fetch_attachments(
+        self,
+        project_id: str,
+        layer_id: str,
+        doc_id: str,
+        callback: Callable[[tuple[Attachment, ...] | None, bool], None],
+    ) -> bool:
+        """Ask the app for a document's attachments with current media URLs.
+
+        `callback(attachments, removed)`; attachments is None on an error.
+        Returns False, without calling back, when the app is not connected."""
+        client = self.media_client(project_id)
+        if client is None:
+            return False
+        params: dict[str, Any] = {
+            "projectId": project_id,
+            "layerId": layer_id,
+            "ids": [doc_id],
+        }
+
+        def got(result: Any, error: Any) -> None:
+            if error is not None or not isinstance(result, dict):
+                callback(None, False)
+                return
+            for feature in result.get("features") or []:
+                if isinstance(feature, dict) and feature.get("id") == doc_id:
+                    callback(parse_attachments(feature.get("attachments")), False)
+                    return
+            callback((), doc_id in (result.get("removed") or []))
+
+        client.request("layers.getFeatures", params, got)
+        return True
+
+    def download(self, project_id: str) -> MediaDownload | None:
+        return self._downloads.get(project_id)
+
+    def download_all_media(self, project_id: str) -> MediaDownload | None:
+        """Start fetching every media file of a project; None if not connected."""
+        running = self._downloads.get(project_id)
+        if running is not None:
+            return running
+        client = self.media_client(project_id)
+        layers = self.available_layers(project_id)
+        if client is None or not layers:
+            return None
+
+        def request(method: str, params: Any, callback: Any) -> None:
+            if client.is_ready:
+                client.request(method, params, callback)
+            else:
+                callback(None, None)
+
+        download = MediaDownload(
+            project_id,
+            [layer.layer_id for layer in layers],
+            request,
+            self.fetcher,
+            self,
+        )
+        self._downloads[project_id] = download
+        download.finished.connect(lambda p=project_id: self._on_download_done(p))
+        download.start()
+        self.downloadsChanged.emit()
+        return download
+
+    def _on_download_done(self, project_id: str) -> None:
+        download = self._downloads.pop(project_id, None)
+        if download is not None:
+            self.last_download = (project_id, download.summary)
+            download.deleteLater()
+        self.downloadsChanged.emit()
 
     def add_layer(self, project_id: str, layer_id: str) -> QgsVectorLayer | None:
         info = self.ensure_table(project_id, layer_id)
@@ -338,6 +443,11 @@ class Controller(QObject):
         if sync is not None:
             sync.close()
             sync.deleteLater()
+        download = self._downloads.get(project_id)
+        if download is not None:
+            download.cancel()
+        self.fetcher.abort_project(project_id)
+        self.media.remove_project(project_id)
         problem = None
         try:
             self.cache(project_id).remove()
@@ -399,6 +509,7 @@ class Controller(QObject):
     def _on_client_ready(self, build_type: str, client: LocalApiClient) -> None:
         client.notification.connect(self._on_notification)
         self._list_projects(build_type, client)
+        self._retry_media()
 
     def _list_projects(
         self, build_type: str, client: LocalApiClient, full: bool = True
