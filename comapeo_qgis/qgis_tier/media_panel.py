@@ -171,6 +171,7 @@ class MediaPanel(QWidget):
 
         controller.selectionChanged.connect(self.on_selection)
         controller.mediaRetry.connect(self.reload)
+        controller.mediaRemoving.connect(self._on_media_removing)
         controller.changed.connect(self._on_controller_changed)
         self.fetcher.fetched.connect(self._on_fetched)
         self.player.stateChanged.connect(self._on_player_state)
@@ -279,6 +280,10 @@ class MediaPanel(QWidget):
             self._render()
         elif not self._online and not self._waiting_for_list and connected:
             self.reload()
+
+    def _on_media_removing(self, project_id: str) -> None:
+        if self._current is not None and self._current[0] == project_id:
+            self._clear(HINT_NONE)
 
     # State of one variant
 

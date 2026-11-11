@@ -271,3 +271,50 @@ def test_with_the_app_gone_the_panel_says_what_is_not_saved(plugin, fake, http):
     assert "not saved on this computer" in panel.preview.text()
     pump(300)
     assert "/blobs/kept/preview" not in http.requests
+
+
+def test_cancelling_download_all_media_still_loads_the_selected_photo(
+    plugin, fake, http
+):
+    a = observation("a")
+    a["attachments"] = [photo(http, "shown", "#ff0000")]
+    layer = start(plugin, fake, [a])
+    dock = plugin.dock
+    panel = dock.media_area
+    http.hold("/blobs/shown/thumbnail")
+    select(layer, ["a"])
+    wait_until(lambda: "/blobs/shown/thumbnail" in http.requests)
+    dock.projects.topLevelItem(0).setSelected(True)
+    dock.download_button.click()
+    wait_until(lambda: len(media_files()) == 2, message="preview and original")
+    dock.cancel_download_button.click()
+    wait_until(lambda: dock.cancel_download_button.isHidden())
+    http.release("/blobs/shown/thumbnail")
+    wait_until(lambda: [i.text() for i in photo_items(panel)] == [""])
+
+
+def test_remove_cached_data_leaves_nothing_behind_while_photos_load(
+    plugin, fake, http, monkeypatch
+):
+    from qgis.PyQt.QtWidgets import QMessageBox
+
+    a = observation("a")
+    names = [f"held{n}" for n in range(4)]
+    a["attachments"] = [photo(http, name, "#ff0000") for name in names]
+    layer = start(plugin, fake, [a])
+    dock = plugin.dock
+    panel = dock.media_area
+    for name in names:
+        http.hold(f"/blobs/{name}/thumbnail")
+    select(layer, ["a"])
+    wait_until(lambda: sum("thumbnail" in p for p in http.requests) == 4)
+    dock.projects.topLevelItem(0).setSelected(True)
+    monkeypatch.setattr(
+        QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Yes
+    )
+    dock.remove_button.click()
+    assert "Select an observation" in panel.message.text()
+    for name in names:
+        http.release(f"/blobs/{name}/thumbnail")
+    pump(500)
+    assert media_files() == []
