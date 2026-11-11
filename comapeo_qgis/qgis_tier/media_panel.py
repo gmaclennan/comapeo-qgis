@@ -225,6 +225,7 @@ class MediaPanel(QWidget):
                 return
             self._attachments = attachments
             self._online = True
+            self.fetcher.clear_errors(project_id, [a.key for a in attachments])
             self._render()
             self._resume_pending()
 
@@ -269,13 +270,14 @@ class MediaPanel(QWidget):
         if self._current is None:
             return
         project_id = self._current[0]
+        connected = self.controller.media_client(project_id) is not None
         if not self.controller.cache(project_id).exists:
             self._clear(HINT_NONE)
-        elif (
-            not self._online
-            and not self._waiting_for_list
-            and self.controller.media_client(project_id) is not None
-        ):
+        elif (self._online or self._waiting_for_list) and not connected:
+            self._online = False
+            self._waiting_for_list = False
+            self._render()
+        elif not self._online and not self._waiting_for_list and connected:
             self.reload()
 
     # State of one variant
