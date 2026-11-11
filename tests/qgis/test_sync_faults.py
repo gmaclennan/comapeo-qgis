@@ -23,6 +23,22 @@ from tests.qgis.conftest import process_events, pump, use_discovery, wait_until
 from tests.qgis.helpers import rows
 from tests.qgis.test_browser_model import child_index
 
+INCOMPLETE = (
+    "Not connected. The first download did not finish, so this data is incomplete."
+)
+
+
+class DiesMidFetchServer(FakeServer):
+    """Goes away, connection and listener, when asked for a second page."""
+
+    def _get_features(self, params):
+        if params.get("cursor") is not None:
+            listener, self._listener = self._listener, None
+            if listener is not None:
+                listener.close()
+            raise ConnectionError("killed during the first download")
+        return super()._get_features(params)
+
 
 class MissingLayerServer(FakeServer):
     """Lists `tracks` but answers LAYER_NOT_FOUND for its features."""
@@ -295,7 +311,7 @@ def test_last_updated_is_unknown_until_every_layer_was_fetched(plugin, fake):
 
     fake.stop()
     wait_until(lambda: not controller.project_status("p1").connected)
-    assert "unknown time" in controller.project_status("p1").describe()
+    assert controller.project_status("p1").describe() == INCOMPLETE
 
 
 def test_wrong_secret_reads_as_not_running_and_sends_only_hello(plugin, fake):
@@ -332,3 +348,46 @@ def test_last_updated_is_the_oldest_layer_refresh(plugin, fake):
     wait_until(lambda: controller.project_status("p1").error)
     wait_until(lambda: not controller.project_status("p1").busy)
     assert controller.project_status("p1").last_refresh < started
+
+
+def badge_tooltips(plugin, layer) -> list[str]:
+    view = plugin.iface.layerTreeView()
+    node = QgsProject.instance().layerTreeRoot().findLayer(layer.id())
+    return [indicator.toolTip() for indicator in view.indicators(node)]
+
+
+def test_interrupted_first_download_reads_as_incomplete(iface):
+    server = DiesMidFetchServer().start()
+    plugin = CoMapeoPlugin(iface)
+    try:
+        project = FakeProject("p1", "Fake project")
+        project.features["observations"] = [
+            observation(f"o{i:04d}") for i in range(2500)
+        ]
+        controller = start(plugin, server, project)
+        layer = controller.add_layer("p1", "observations")
+        wait_until(lambda: not controller.project_status("p1").connected)
+        wait_until(lambda: len(rows(layer)) == 1000, message="first page kept")
+
+        status = controller.project_status("p1")
+        assert status.incomplete
+        assert status.describe() == INCOMPLETE
+        wait_until(lambda: plugin.indicators.stale_layers() == [layer.id()])
+        assert badge_tooltips(plugin, layer) == [INCOMPLETE]
+        wait_until(lambda: plugin.dock.projects.topLevelItem(0) is not None)
+        assert plugin.dock.projects.topLevelItem(0).text(1) == INCOMPLETE
+
+        plugin.unload()
+        plugin = CoMapeoPlugin(iface)
+        plugin.initGui()
+        [reopened] = [
+            map_layer
+            for map_layer in QgsProject.instance().mapLayers().values()
+            if map_layer.customProperty("comapeo/layerId") == "observations"
+        ]
+        assert plugin.controller.project_status("p1").describe() == INCOMPLETE
+        wait_until(lambda: plugin.indicators.stale_layers() == [reopened.id()])
+        assert badge_tooltips(plugin, reopened) == [INCOMPLETE]
+    finally:
+        plugin.unload()
+        server.stop()
