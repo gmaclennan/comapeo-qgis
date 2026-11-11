@@ -44,21 +44,13 @@ class BlockingClient:
             request_timeout=request_timeout,
             handshake_timeout=handshake_timeout,
         )
-        self.sock: socket.socket | None = None
+        self.sock: Any = None
         self.events: deque[Event] = deque()
         self.log: list[Event] = []
 
     def connect(self) -> Event:
         """Connect and run the handshake; returns the first decisive event."""
-        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        sock.settimeout(2)
-        try:
-            sock.connect(self.socket_path)
-        except OSError:
-            sock.close()
-            raise
-        sock.settimeout(0.05)
-        self.sock = sock
+        self.sock = self._open(self.socket_path)
         self.conn.start()
         self._flush()
         return self.wait_for(lambda e: not isinstance(e, Notification), timeout=6)
@@ -93,7 +85,7 @@ class BlockingClient:
         self._push(self.conn.close())
         if self.sock is not None:
             with contextlib.suppress(OSError):
-                self.sock.close()
+                self._shut()
             self.sock = None
 
     @property
@@ -104,29 +96,52 @@ class BlockingClient:
         if self.sock is None:
             time.sleep(0.01)
             return
-        try:
-            data = self.sock.recv(65536)
-        except socket.timeout:  # not TimeoutError before Python 3.10
-            data = None
-        except OSError:
-            data = b""
+        data = self._recv()
         if data:
             self._push(self.conn.receive_data(data))
         elif data == b"":
             self._push(self.conn.connection_lost())
-            self.sock.close()
+            self._shut()
             self.sock = None
         self._push(self.conn.tick())
         self._flush()
 
     def _flush(self) -> None:
         if self.conn.wants_close and self.sock is not None:
-            self.sock.close()
+            self._shut()
             self.sock = None
             return
         data = self.conn.data_to_send()
         if data and self.sock is not None:
-            self.sock.sendall(data)
+            self._send(data)
+
+    # The stream; tests/qgis/helpers.py swaps in QLocalSocket for named pipes.
+
+    def _open(self, path: str) -> Any:
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.settimeout(2)
+        try:
+            sock.connect(path)
+        except OSError:
+            sock.close()
+            raise
+        sock.settimeout(0.05)
+        return sock
+
+    def _recv(self) -> bytes | None:
+        """Waits briefly; None when nothing arrived, b"" once the peer closed."""
+        try:
+            return self.sock.recv(65536)
+        except socket.timeout:  # not TimeoutError before Python 3.10
+            return None
+        except OSError:
+            return b""
+
+    def _send(self, data: bytes) -> None:
+        self.sock.sendall(data)
+
+    def _shut(self) -> None:
+        self.sock.close()
 
     def _push(self, events: list[Event]) -> None:
         self.events.extend(events)

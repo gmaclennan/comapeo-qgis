@@ -237,10 +237,13 @@ def _check_private(st: os.stat_result) -> None:
         )
 
 
+_PIPE_PREFIXES = ("\\\\.\\pipe\\", "\\\\?\\pipe\\")
+
+
 def _process_looks_alive(info: DiscoveryInfo, environment: Environment) -> bool:
-    # Only POSIX can check cheaply; os.kill(pid, 0) on Windows sends CTRL_C_EVENT.
+    # os.kill(pid, 0) on Windows sends CTRL_C_EVENT, so only the pipe is checked.
     if environment.platform.startswith("win"):
-        return True
+        return _pipe_looks_alive(info.socket_path)
     if not os.path.exists(info.socket_path):
         return False
     if info.pid is None or info.pid <= 0:
@@ -252,6 +255,17 @@ def _process_looks_alive(info: DiscoveryInfo, environment: Environment) -> bool:
     except (OSError, OverflowError):
         return True
     return True
+
+
+def _pipe_looks_alive(path: str) -> bool:
+    """Listing the pipe namespace, unlike opening a pipe, does not connect to it."""
+    if not path.lower().startswith(_PIPE_PREFIXES):
+        return os.path.exists(path)
+    name = path[len(_PIPE_PREFIXES[0]) :].lower()
+    try:
+        return name in {entry.lower() for entry in os.listdir(_PIPE_PREFIXES[0])}
+    except OSError:
+        return True
 
 
 def _pure(environment: Environment, path: str) -> PurePath:

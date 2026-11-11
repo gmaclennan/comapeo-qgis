@@ -1,0 +1,191 @@
+name: Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # gmaclennan/comapeo-local-api main; bump to test against a newer server.
+  LOCAL_API_SHA: bbbaf4b1e9c26bf85ae725534ae05bcf82543d9b
+  QT_QPA_PLATFORM: offscreen
+  PYTHONDONTWRITEBYTECODE: '1'
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - run: python -m pip install ruff
+      - run: ruff check .
+      - run: ruff format --check .
+
+  pytest:
+    name: pytest / ${{ matrix.os }} / Python ${{ matrix.python }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python: ['3.9', '3.12']
+    steps:
+      - uses: actions/checkout@v7
+      # setup-python has no 3.9 for the newest runner images; uv fetches one.
+      - uses: astral-sh/setup-uv@v10.3.3  # no floating major tag
+      - run: uv run --no-project --python ${{ matrix.python }} --with 'pytest>=8' python -m pytest -rs -m "not real_server"
+
+  real-server:
+    name: real server / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    env:
+      COMAPEO_REQUIRE_SERVER: '1'
+      COMAPEO_JOB_LABEL: real server / ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7
+        with:
+          repository: gmaclennan/comapeo-local-api
+          ref: ${{ env.LOCAL_API_SHA }}
+          path: comapeo-local-api
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: comapeo-local-api/package-lock.json
+      - run: npm ci
+        working-directory: comapeo-local-api
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - run: python -m pip install 'pytest>=8'
+      - run: python -m pytest -rs -m real_server
+        env:
+          COMAPEO_LOCAL_API_DIR: ${{ github.workspace }}/comapeo-local-api
+
+  qgis-docker:
+    name: QGIS ${{ matrix.tag }} (Docker)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - tag: ltr
+            expect: 3/5
+          - tag: stable
+            expect: 4/6
+    container:
+      image: qgis/qgis:${{ matrix.tag }}
+    env:
+      COMAPEO_REQUIRE_SERVER: '1'
+      COMAPEO_REQUIRE_QGIS: '1'
+      COMAPEO_EXPECT_QGIS: ${{ matrix.expect }}
+      COMAPEO_JOB_LABEL: QGIS ${{ matrix.tag }} (Docker)
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7
+        with:
+          repository: gmaclennan/comapeo-local-api
+          ref: ${{ env.LOCAL_API_SHA }}
+          path: comapeo-local-api
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - run: npm ci
+        working-directory: comapeo-local-api
+      - name: Install pytest beside QGIS's Python
+        run: |
+          python3 -m pip install --quiet --target /opt/test-deps 'pytest>=8' pytest-timeout
+          echo "PYTHONPATH=/opt/test-deps${PYTHONPATH:+:$PYTHONPATH}" >> "$GITHUB_ENV"
+          echo "COMAPEO_LOCAL_API_DIR=$GITHUB_WORKSPACE/comapeo-local-api" >> "$GITHUB_ENV"
+      - run: python3 -c "from qgis.core import Qgis; print(Qgis.QGIS_VERSION)"
+      - run: python3 -m pytest -rs --timeout=300
+
+  qgis-windows:
+    name: QGIS ${{ matrix.package }} (Windows OSGeo4W)
+    runs-on: windows-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - package: qgis-ltr
+            python: python-qgis-ltr.bat
+            expect: 3/5
+          - package: qgis
+            python: python-qgis.bat
+            expect: 4/6
+    env:
+      COMAPEO_REQUIRE_SERVER: '1'
+      COMAPEO_REQUIRE_QGIS: '1'
+      COMAPEO_EXPECT_QGIS: ${{ matrix.expect }}
+      COMAPEO_JOB_LABEL: QGIS ${{ matrix.package }} (Windows OSGeo4W)
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7
+        with:
+          repository: gmaclennan/comapeo-local-api
+          ref: ${{ env.LOCAL_API_SHA }}
+          path: comapeo-local-api
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: comapeo-local-api/package-lock.json
+      - run: npm ci
+        working-directory: comapeo-local-api
+      - name: Install QGIS with OSGeo4W
+        shell: pwsh
+        run: |
+          # download.osgeo.org has timed out from runners; the OSUOSL mirror has not.
+          $sites = @(
+            'https://ftp.osuosl.org/pub/osgeo/download/osgeo4w/v2',
+            'https://download.osgeo.org/osgeo4w/v2'
+          )
+          $site = $null
+          foreach ($candidate in $sites) {
+            curl.exe -fsSL --connect-timeout 20 --max-time 120 --retry 2 -o osgeo4w-setup.exe "$candidate/osgeo4w-setup.exe"
+            if ($LASTEXITCODE -eq 0) { $site = $candidate; break }
+            Write-Host "could not download from $candidate"
+          }
+          if (-not $site) { throw 'no OSGeo4W site reachable' }
+          Write-Host "using site $site"
+          $setupArgs = @(
+            '--autoaccept', '--advanced', '--arch', 'x86_64', '--quiet-mode',
+            '--only-site', '--no-shortcuts',
+            '--root', 'C:\OSGeo4W',
+            '--site', $site,
+            '--local-package-dir', 'C:\o4w-pkgs',
+            '--packages', '${{ matrix.package }},python3-pip'
+          )
+          $proc = Start-Process .\osgeo4w-setup.exe -ArgumentList $setupArgs -Wait -PassThru
+          Write-Host "setup exit code: $($proc.ExitCode)"
+          if (-not (Test-Path "C:\OSGeo4W\bin\${{ matrix.python }}")) { throw 'QGIS Python not installed' }
+      - name: Install pytest beside QGIS's Python
+        shell: pwsh
+        run: |
+          # OSGeo4W's environment script resets PATH and PYTHONPATH, so pytest goes
+          # into its own Python and Node is named explicitly.
+          & "C:\OSGeo4W\bin\${{ matrix.python }}" -m pip install --quiet --disable-pip-version-check 'pytest>=8' pytest-timeout
+          if ($LASTEXITCODE -ne 0) { throw 'pip failed' }
+          "COMAPEO_NODE=$((Get-Command node).Source)" >> $env:GITHUB_ENV
+          "COMAPEO_LOCAL_API_DIR=$env:GITHUB_WORKSPACE\comapeo-local-api" >> $env:GITHUB_ENV
+      - shell: cmd
+        run: C:\OSGeo4W\bin\${{ matrix.python }} -c "from qgis.core import Qgis; print(Qgis.QGIS_VERSION)"
+      - shell: cmd
+        run: C:\OSGeo4W\bin\${{ matrix.python }} -m pytest -rs --timeout=300 tests/qgis

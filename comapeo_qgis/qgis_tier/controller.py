@@ -16,7 +16,7 @@ from qgis.core import (
     QgsSettings,
     QgsVectorLayer,
 )
-from qgis.PyQt.QtCore import QObject, QTimer, pyqtSignal
+from qgis.PyQt.QtCore import QCoreApplication, QEvent, QObject, QTimer, pyqtSignal
 
 from ..core.media import MediaCache
 from ..core.model import (
@@ -70,6 +70,8 @@ class ProjectStatus:
     error: str | None
     warning: str | None
     offered: bool = False
+    # Some cached layer has never finished a full fetch.
+    incomplete: bool = False
 
     @property
     def stale(self) -> bool:
@@ -78,6 +80,12 @@ class ProjectStatus:
     def describe(self) -> str:
         when = format_time(self.last_refresh)
         if self.gone:
+            if self.incomplete:
+                return (
+                    "No longer available in CoMapeo Desktop. The first download "
+                    "did not finish, so the cached data is incomplete. You can "
+                    "remove the cached data."
+                )
             return (
                 "No longer available in CoMapeo Desktop. Showing data cached "
                 f"{when}. You can remove the cached data."
@@ -85,6 +93,11 @@ class ProjectStatus:
         if not self.connected:
             if self.offered:
                 return "Not on the map."
+            if self.incomplete:
+                return (
+                    "Not connected. The first download did not finish, so this "
+                    "data is incomplete."
+                )
             return f"Not connected. Showing data cached {when}."
         if self.error:
             return self.error
@@ -253,13 +266,13 @@ class Controller(QObject):
         sync = self._syncs.get(project_id)
         cache = self.cache(project_id)
         stamps = []
-        complete = cache.exists
+        incomplete = False
         if cache.exists:
             for info in cache.tables().values():
                 try:
                     stamps.append(datetime.fromisoformat(info.last_refresh or ""))
                 except (TypeError, ValueError):
-                    complete = False
+                    incomplete = True
         return ProjectStatus(
             project_id=project_id,
             name=self.project_name(project_id),
@@ -267,10 +280,11 @@ class Controller(QObject):
             gone=project_id in self._gone,
             busy=sync is not None and sync.busy,
             # The oldest: the data is only as fresh as its least recently fetched layer.
-            last_refresh=min(stamps) if stamps and complete else None,
+            last_refresh=min(stamps) if stamps and not incomplete else None,
             error=sync.error if sync else None,
             warning=sync.warning if sync else None,
             offered=project_id in self._served and sync is None,
+            incomplete=incomplete,
         )
 
     def cache(self, project_id: str) -> ProjectCache:
@@ -338,6 +352,14 @@ class Controller(QObject):
         problem = None
         try:
             self.cache(project_id).remove()
+        except PermissionError:
+            # Windows refuses to delete an open file; the removed layers close it
+            # only when their deferred deletion runs.
+            QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+            try:
+                self.cache(project_id).remove()
+            except OSError as err:
+                problem = f"Could not delete the cached data: {err.strerror or err}"
         except OSError as err:
             problem = f"Could not delete the cached data: {err.strerror or err}"
         self._caches.pop(project_id, None)

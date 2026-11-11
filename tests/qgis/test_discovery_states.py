@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import os
 import shutil
-import tempfile
 
 import pytest
 from qgis.core import QgsBrowserModel
@@ -13,13 +12,14 @@ from qgis.PyQt.QtCore import QModelIndex
 
 from comapeo_qgis.plugin import CoMapeoPlugin
 from comapeo_qgis.qgis_tier.connection import NOT_RUNNING_MESSAGE, ServerState
+from tests.fake_server import short_tempdir
 from tests.qgis.conftest import process_events, use_discovery, wait_until
 from tests.qgis.test_browser_model import child_index
 
 
 @pytest.fixture
 def folder():
-    path = tempfile.mkdtemp(prefix="cq-disc-", dir="/tmp")
+    path = short_tempdir()
     yield path
     shutil.rmtree(path, ignore_errors=True)
 
@@ -111,6 +111,7 @@ def test_corrupt_file_is_reported(plugin, folder):
     assert status.state is ServerState.ERROR
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX file permissions")
 def test_file_other_users_can_read_is_refused(plugin, folder):
     write(folder, json.dumps({"discoveryVersion": 1}), mode=0o644)
     use_discovery(folder)

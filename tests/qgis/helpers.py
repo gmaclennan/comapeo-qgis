@@ -14,18 +14,47 @@ from qgis.core import (
     QgsVariantUtils,
     QgsVectorLayer,
 )
+from qgis.PyQt.QtNetwork import QLocalSocket
 
 from comapeo_qgis.core.discovery import find_servers
 from tests.driver import BlockingClient
 
 
+class QtBlockingClient(BlockingClient):
+    """BlockingClient over QLocalSocket, which also speaks Windows named pipes."""
+
+    def _open(self, path: str) -> QLocalSocket:
+        sock = QLocalSocket()
+        sock.connectToServer(path)
+        if not sock.waitForConnected(5000):
+            message = sock.errorString()
+            sock.abort()
+            raise ConnectionError(f"cannot connect to {path}: {message}")
+        return sock
+
+    def _recv(self) -> bytes | None:
+        sock = self.sock
+        if sock.bytesAvailable() == 0 and not sock.waitForReadyRead(50):
+            connected = QLocalSocket.LocalSocketState.ConnectedState
+            return b"" if sock.state() != connected else None
+        return bytes(sock.readAll()) or None
+
+    def _send(self, data: bytes) -> None:
+        self.sock.write(data)
+        self.sock.waitForBytesWritten(5000)
+
+    def _shut(self) -> None:
+        self.sock.abort()
+
+
 class Oracle:
-    """The truth, fetched over its own connection with the core's blocking driver."""
+    """The truth, fetched over its own connection with the core's protocol client."""
 
     def __init__(self, discovery_dir: str) -> None:
         [found] = find_servers(override=discovery_dir)
         assert found.usable, found
-        self.client = BlockingClient(
+        self.socket_path = found.info.socket_path
+        self.client = QtBlockingClient(
             found.info.socket_path, found.info.secret, request_timeout=30
         )
         self.client.connect()

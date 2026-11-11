@@ -106,15 +106,14 @@ def test_dragged_layer_is_adopted_like_a_double_clicked_one(plugin, oracle, mode
 
 def test_real_browser_model_survives_repeated_refreshes(plugin, oracle, model):
     wait_until(lambda: plugin.controller.available_layers(oracle.project_id))
-    root = model.dataItem(child_index(model, QModelIndex(), "CoMapeo"))
+    # Through the model only: QgsDataItem.children() is unsafe under PyQt5.
+    items = browse(plugin, oracle, model)
+    assert sorted(items) == ["Observations", "Tracks"]
     for _ in range(5):
         plugin.controller.changed.emit()
         pump(150)  # past the provider's 100 ms debounce, so each emit refreshes
-        wait_until(lambda: root.children(), message="root children")
-    [app] = root.children()
-    app.populate(True)
-    wait_until(lambda: app.children(), message="app children")
-    [project] = app.children()
-    project.populate(True)
-    wait_until(lambda: project.children(), message="project children")
-    assert sorted(c.name() for c in project.children()) == ["Observations", "Tracks"]
+    items = browse(plugin, oracle, model)
+    assert sorted(items) == ["Observations", "Tracks"]
+    assert items["Observations"].handleDoubleClick()
+    [layer] = comapeo_map_layers()
+    wait_until(lambda: set(rows(layer)) == set(oracle.features("observations")))

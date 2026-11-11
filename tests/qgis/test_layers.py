@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import math
+import sys
 
 import pytest
 from qgis.core import (
@@ -170,6 +171,9 @@ def test_connects_and_shows_status_in_the_panel(plugin, oracle):
     wait_until(lambda: controller.connected, message="connected")
     [status] = controller.server_statuses
     assert status.state is ServerState.CONNECTED
+    # On Windows this connection, and the oracle's, run over a named pipe.
+    is_pipe = oracle.socket_path.lower().startswith("\\\\.\\pipe\\")
+    assert is_pipe == (sys.platform == "win32"), oracle.socket_path
     wait_until(lambda: "Connected" in plugin.dock.status_label.text())
     wait_until(lambda: plugin.dock.projects.topLevelItemCount() == 1)
     assert plugin.dock.projects.topLevelItem(0).text(0) == oracle.project_name

@@ -4,7 +4,7 @@ A QGIS plugin that shows the observations and tracks of a CoMapeo project as lay
 
 Status: early development. Observations and tracks show as read-only layers with category icons, kept in a local cache and updated live; the photo and audio panel is not built yet. Scope and design are in [docs/PLAN.md](docs/PLAN.md). The wire contract is `docs/PROTOCOL.md` in the `comapeo-local-api` repository.
 
-Tested so far on QGIS 4.0 and 4.2 on macOS. QGIS 3.40 and later (Qt5), Windows and Linux are intended but not yet tested.
+Continuous integration runs the tests on QGIS 3.44 (Qt5) and the current 4.x release (Qt6), on Linux (the official `qgis/qgis` Docker images) and Windows (OSGeo4W), against the `@comapeo/local-api` dev server; on Windows the plugin connects to it over a named pipe. The plain-Python tests also run on macOS, Linux and Windows under Python 3.9 and 3.12. QGIS 4.0 and 4.2 on macOS are tested locally, and by hand in a real QGIS window. Not yet tested: QGIS 3.40, the QGIS macOS app in CI, and CoMapeo Desktop itself (only the dev server). On Windows the tests that use the Python fake server (faults, schema rebuilds, several app builds) are skipped, because it needs Unix sockets.
 
 ## Development
 
@@ -15,7 +15,7 @@ uv sync                                   # creates .venv with pytest and ruff
 uv run --isolated --no-project --python 3.9 --with 'pytest>=8' python -m pytest   # oldest Python QGIS 3.40 allows
 ```
 
-`tests/test_real_server.py` and most of `tests/qgis/` start the `@comapeo/local-api` dev server from a sibling `../comapeo-local-api` checkout (or `COMAPEO_LOCAL_API_DIR`) with Node 22.18 or later, and skips itself when that is not available. Add `-m "not real_server"` to leave it out.
+`tests/test_real_server.py` and most of `tests/qgis/` start the `@comapeo/local-api` dev server from a sibling `../comapeo-local-api` checkout (or `COMAPEO_LOCAL_API_DIR`) with Node 22.18 or later, and skips itself when that is not available. Add `-m "not real_server"` to leave it out. CI sets `COMAPEO_REQUIRE_SERVER=1`, which turns any such skip into a failure, and `COMAPEO_REQUIRE_QGIS=1`, which makes a missing QGIS an error rather than leaving `tests/qgis/` out.
 
 On macOS with QGIS installed in `/Applications`, run the same tests under QGIS's own Python:
 

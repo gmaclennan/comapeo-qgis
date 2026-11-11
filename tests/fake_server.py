@@ -21,6 +21,8 @@ import threading
 from dataclasses import dataclass, field
 from typing import Any
 
+import pytest
+
 HANDSHAKE_LIMIT = 4 * 1024
 FRAME_LIMIT = 16 * 1024 * 1024
 
@@ -29,7 +31,7 @@ SVG_ICON = b'<svg xmlns="http://www.w3.org/2000/svg" width="4" height="4"/>'
 
 def short_tempdir() -> str:
     # pytest's tmp_path on macOS is too long for a Unix socket path.
-    return tempfile.mkdtemp(prefix="cq-", dir="/tmp")
+    return tempfile.mkdtemp(prefix="cq-", dir="/tmp" if os.name == "posix" else None)
 
 
 def frame(message: Any) -> bytes:
@@ -242,6 +244,8 @@ class FakeServer:
         return path
 
     def start(self) -> FakeServer:
+        if not hasattr(socket, "AF_UNIX"):
+            pytest.skip("the fake server needs AF_UNIX sockets")
         listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         listener.bind(self.socket_path)
         listener.listen()

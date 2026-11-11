@@ -43,6 +43,10 @@ def _fast(item: QgsDataItem, fertile: bool = False) -> None:
         item.setCapabilities(flags)
 
 
+def _item_key(item: QgsDataItem) -> tuple[str, str]:
+    return type(item).__name__, item.path()
+
+
 class _Keeper:
     """Strong references to every item the provider made, until QGIS deletes it.
 
@@ -81,14 +85,26 @@ class _Collection(QgsDataCollectionItem):
         super().__init__(parent, name, path, PROVIDER_NAME)
         self.controller = controller
         self.keeper = keeper
-        # Not Fertile: a refresh adopts children its temporary copy then deletes.
+        self.owner: _Collection | None = None
+        # The children QGIS holds, by key. Kept here because QgsDataItem.children()
+        # under PyQt5 returns new Python-owned wrappers that delete the items.
+        self.held: dict[tuple[str, str], QgsDataItem] = {}
+        # Without Fertile, a refresh adopts children its temporary copy then deletes.
         _fast(self, fertile=True)
 
     def createChildren(self) -> list[QgsDataItem]:
         children = self.build_children()
+        held = {}
         for child in children:
             sip.transferto(child, None)
             self.keeper.keep(child)
+            if isinstance(child, _Collection):
+                child.owner = self
+            # QgsDataItem::refresh keeps an existing child equal to a new one.
+            key = _item_key(child)
+            old = self.held.get(key)
+            held[key] = old if old is not None and not sip.isdeleted(old) else child
+        self.held = held
         return children
 
     def build_children(self) -> list[QgsDataItem]:
@@ -317,21 +333,17 @@ class CoMapeoItemProvider(QgsDataItemProvider):
                 item.refresh()
         self._keeper.prune()
 
-    def _attached(self, item: QgsDataItem) -> bool:
+    def _attached(self, item: _Collection) -> bool:
         """Still in a tree under one of our roots, not removed and awaiting deletion."""
         while True:
-            parent = item.parent()
-            if parent is None:
-                return any(
-                    sip.unwrapinstance(r) == sip.unwrapinstance(item)
-                    for r in self._roots
-                )
-            if sip.isdeleted(parent) or not any(
-                sip.unwrapinstance(c) == sip.unwrapinstance(item)
-                for c in parent.children()
-            ):
+            if sip.isdeleted(item):
                 return False
-            item = parent
+            owner = item.owner
+            if owner is None:
+                return any(r is item for r in self._roots)
+            if owner.held.get(_item_key(item)) is not item:
+                return False
+            item = owner
 
     def shutdown(self) -> None:
         self._timer.stop()

@@ -15,7 +15,13 @@ import pytest
 from qgis.core import QgsApplication, QgsLayerTreeModel, QgsProject, QgsSettings
 from qgis.gui import QgsLayerTreeView, QgsMapCanvas
 from qgis.PyQt.QtCore import QEventLoop, Qt, QTimer
-from qgis.PyQt.QtWidgets import QDockWidget, QMainWindow, QMenu, QToolBar
+from qgis.PyQt.QtWidgets import (
+    QDockWidget,
+    QMainWindow,
+    QMenu,
+    QMessageBox,
+    QToolBar,
+)
 from qgis.testing import start_app
 
 from tests import dev_server as dev
@@ -44,6 +50,23 @@ def no_uncaught_exceptions(monkeypatch) -> Iterator[list[Any]]:
     monkeypatch.setattr(sys, "excepthook", lambda *exc: seen.append(exc))
     yield seen
     assert not seen, seen
+
+
+@pytest.fixture(autouse=True)
+def no_modal_dialogs(monkeypatch) -> Iterator[None]:
+    """An unexpected message box would block a headless run forever; fail instead.
+    Tests that expect one patch the method themselves."""
+
+    def refuse(name: str) -> Callable[..., Any]:
+        def show(*args: Any, **_kwargs: Any) -> Any:
+            texts = [a for a in args if isinstance(a, str)]
+            raise AssertionError(f"unexpected QMessageBox.{name}: {texts}")
+
+        return show
+
+    for name in ("question", "warning", "critical", "information"):
+        monkeypatch.setattr(QMessageBox, name, refuse(name))
+    yield
 
 
 def wait_until(
