@@ -41,7 +41,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       # setup-python has no 3.9 for the newest runner images; uv fetches one.
-      - uses: astral-sh/setup-uv@v10
+      - uses: astral-sh/setup-uv@v10.3.3  # no floating major tag
       - run: uv run --no-project --python ${{ matrix.python }} --with 'pytest>=8' python -m pytest -rs -m "not real_server"
 
   real-server:
