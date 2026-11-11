@@ -392,7 +392,7 @@ def _parse_attachment(item: Any) -> Attachment | None:
         return None
     urls = _get(item, "urls")
     urls = (
-        {k: v for k, v in urls.items() if isinstance(k, str) and _nonempty_str(v)}
+        {k: v for k, v in urls.items() if k in MEDIA_VARIANTS and _nonempty_str(v)}
         if isinstance(urls, dict)
         else {}
     )

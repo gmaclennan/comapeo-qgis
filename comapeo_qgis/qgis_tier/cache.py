@@ -23,7 +23,7 @@ import math
 import os
 import re
 import sqlite3
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -34,13 +34,13 @@ from qgis.core import (
     QgsApplication,
     QgsCoordinateReferenceSystem,
     QgsCoordinateTransformContext,
-    QgsExpression,
     QgsFeature,
     QgsFeatureRequest,
     QgsField,
     QgsFields,
     QgsGeometry,
     QgsLineString,
+    QgsMessageLog,
     QgsPoint,
     QgsProviderRegistry,
     QgsVectorFileWriter,
@@ -72,6 +72,13 @@ from .qt_compat import meta_type, to_qdatetime
 
 META_TABLE = "comapeo_meta"
 FILE_SUFFIX = ".gpkg"
+# GDAL waits 5 s on a locked GeoPackage, on the main thread; the plugin reads with
+# sqlite3 instead, and before a write waits this long for another writer.
+WRITE_WAIT_S = 0.25
+LOCKED_MESSAGE = (
+    "Another program is using the cached data, so it could not be updated. "
+    "The plugin tries again every few seconds."
+)
 
 _PRIVATE = (
     ("fid", "fid"),
@@ -247,6 +254,43 @@ class CacheError(Exception):
     pass
 
 
+class CacheLocked(CacheError):
+    """Another program holds a lock on the cache file."""
+
+    def __init__(self, message: str = LOCKED_MESSAGE) -> None:
+        super().__init__(message)
+
+
+def _is_lock(err: sqlite3.Error) -> bool:
+    text = str(err).lower()
+    return "locked" in text or "busy" in text
+
+
+@contextlib.contextmanager
+def _reading(path: Path) -> Iterator[sqlite3.Connection]:
+    """A read-only connection that never waits on a lock: CacheLocked instead."""
+    try:
+        conn = sqlite3.connect(
+            f"{Path(path).resolve().as_uri()}?mode=ro", uri=True, timeout=0
+        )
+    except sqlite3.Error as err:
+        if _is_lock(err):
+            raise CacheLocked() from err
+        raise
+    try:
+        yield conn
+    except sqlite3.Error as err:
+        if _is_lock(err):
+            raise CacheLocked() from err
+        raise
+    finally:
+        conn.close()
+
+
+def _quoted(name: str) -> str:
+    return '"' + name.replace('"', '""') + '"'
+
+
 class ProjectCache:
     def __init__(self, root: Path, project_id: str) -> None:
         self.root = Path(root)
@@ -255,22 +299,48 @@ class ProjectCache:
         self._layers: dict[str, QgsVectorLayer] = {}
         self._meta: dict[str, Any] | None = None
         self._checked: tuple[Any, bool] | None = None
+        # The last read of the metadata found the file locked by another program.
+        self.locked = False
 
     @property
     def exists(self) -> bool:
         return self.path.is_file()
 
     def is_damaged(self) -> bool:
-        """The file exists but is not a readable cache. Remembered per file
-        version, as statuses ask often."""
-        try:
-            st = self.path.stat()
-        except OSError:
+        """The file exists but is not a readable cache. Statuses ask often, so a
+        definite answer is remembered until the file or its write-ahead log
+        changes; while the file is locked the answer is no, and not remembered."""
+        version = _file_version(self.path)
+        if version is None:
             return False
-        version = (st.st_mtime_ns, st.st_size)
         if self._checked is None or self._checked[0] != version:
-            self._checked = (version, _unreadable(self.path))
+            damaged = _damaged(self.path)
+            if damaged is None:
+                return False
+            self._checked = (version, damaged)
         return self._checked[1]
+
+    def set_aside_if_damaged(self) -> None:
+        """Call before writing: metadata written into a damaged file would hide
+        the damage. Windows will not rename an open file; the writes then repair
+        it in place."""
+        if not self.is_damaged():
+            return
+        try:
+            aside = self.set_aside()
+        except OSError as err:
+            QgsMessageLog.logMessage(
+                f"Cannot move the damaged cache {self.path} aside: {err}",
+                "CoMapeo",
+                Qgis.MessageLevel.Warning,
+            )
+            return
+        QgsMessageLog.logMessage(
+            f"The cache {self.path} could not be read; moved it to {aside.name} "
+            "and downloading the project again.",
+            "CoMapeo",
+            Qgis.MessageLevel.Info,
+        )
 
     def set_aside(self) -> Path:
         """Rename the file (and SQLite's side files) out of the way, so a fresh
@@ -312,19 +382,49 @@ class ProjectCache:
     def _read_meta(self) -> dict[str, Any]:
         if self._meta is not None:
             return self._meta
-        layer = self._open(META_TABLE)
-        if layer is None:
+        self.locked = False
+        if not self.exists:
+            return {}
+        try:
+            with _reading(self.path) as conn:
+                found = conn.execute("SELECT key, value FROM comapeo_meta").fetchall()
+        except CacheLocked:
+            self.locked = True
+            return {}
+        except sqlite3.Error:
             return {}
         values = {}
-        for feature in layer.getFeatures():
+        for key, value in found:
+            if not isinstance(key, str) or not isinstance(value, str):
+                continue
             try:
-                values[feature["key"]] = json.loads(feature["value"])
-            except (TypeError, ValueError):
+                values[key] = json.loads(value)
+            except ValueError:
                 continue
         self._meta = values
         return values
 
+    def _wait_for_writers(self) -> None:
+        """Raise CacheLocked rather than let GDAL wait 5 s on another program's lock."""
+        if not self.exists:
+            return
+        try:
+            conn = sqlite3.connect(
+                str(self.path), timeout=WRITE_WAIT_S, isolation_level=None
+            )
+        except sqlite3.Error:
+            return
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute("ROLLBACK")
+        except sqlite3.Error as err:
+            if _is_lock(err):
+                raise CacheLocked() from err
+        finally:
+            conn.close()
+
     def _write_meta(self, key: str, value: Any) -> None:
+        self._wait_for_writers()
         layer = self._open(META_TABLE) or self._create_meta()
         text = json.dumps(value, ensure_ascii=False)
         provider = layer.dataProvider()
@@ -433,6 +533,7 @@ class ProjectCache:
         self._delete_meta(f"layer:{layer_id}")
 
     def _delete_meta(self, key: str) -> None:
+        self._wait_for_writers()
         layer = self._open(META_TABLE)
         if layer is None:
             return
@@ -445,7 +546,24 @@ class ProjectCache:
     # Tables
 
     def is_stored(self, info: TableInfo) -> bool:
-        return self._open(info.table) is not None
+        """Whether the table is in the file; assumed so while the file is locked."""
+        if not self.exists:
+            return False
+        try:
+            with _reading(self.path) as conn:
+                found = conn.execute(
+                    "SELECT 1 FROM gpkg_contents WHERE table_name = ?", (info.table,)
+                ).fetchone()
+                return found is not None and bool(
+                    conn.execute(
+                        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+                        (info.table,),
+                    ).fetchone()
+                )
+        except CacheLocked:
+            return True
+        except sqlite3.Error:
+            return False
 
     def ensure_table(
         self, raw_definition: Mapping[str, Any], schema_key: str, stage: bool = False
@@ -520,6 +638,7 @@ class ProjectCache:
         return committed
 
     def drop_table(self, table: str) -> None:
+        self._wait_for_writers()
         self._layers.pop(table, None)
         metadata = QgsProviderRegistry.instance().providerMetadata("ogr")
         connection = metadata.createConnection(str(self.path), {})
@@ -536,44 +655,49 @@ class ProjectCache:
         return [t.tableName() for t in connection.tables()]
 
     def versions(self, info: TableInfo) -> dict[str, str]:
-        layer = self._open(info.table)
-        if layer is None:
+        """Raises CacheLocked while another program holds the file."""
+        if not self.exists:
             return {}
         id_field, version_field = info.field("doc_id"), info.field("version")
-        request = QgsFeatureRequest()
-        request.setFlags(Qgis.FeatureRequestFlag.NoGeometry)
-        request.setSubsetOfAttributes([id_field, version_field], layer.fields())
+        names = ", ".join(_quoted(n) for n in (id_field, version_field))
+        query = f"SELECT {names} FROM {_quoted(info.table)}"  # noqa: S608 - quoted
+        try:
+            with _reading(self.path) as conn:
+                found = conn.execute(query).fetchall()
+        except CacheLocked:
+            raise
+        except sqlite3.Error:
+            return {}
         return {
-            f[id_field]: f[version_field]
-            for f in layer.getFeatures(request)
-            if isinstance(f[id_field], str) and isinstance(f[version_field], str)
+            doc_id: version
+            for doc_id, version in found
+            if isinstance(doc_id, str) and isinstance(version, str)
         }
 
     def attachments(
         self, info: TableInfo, doc_id: str
     ) -> tuple[Attachment, ...] | None:
-        """The attachments stored with a document; None if it is not cached.
+        """The attachments stored with a document; None if it is not cached, or
+        cannot be read now.
 
         Their URLs date from when the row was written; never fetch from them."""
-        layer = self._open(info.table)
-        if layer is None:
+        if not self.exists:
             return None
         id_field, column = info.field("doc_id"), info.field("attachments")
-        request = QgsFeatureRequest()
-        request.setFilterExpression(
-            QgsExpression.createFieldEqualityExpression(id_field, doc_id)
-        )
-        request.setFlags(Qgis.FeatureRequestFlag.NoGeometry)
-        request.setSubsetOfAttributes([id_field, column], layer.fields())
-        for feature in layer.getFeatures(request):
-            if feature[id_field] == doc_id:
-                return attachments_from_json(feature[column])
-        return None
+        table, column, key = map(_quoted, (info.table, column, id_field))
+        query = f"SELECT {column} FROM {table} WHERE {key} = ? LIMIT 1"  # noqa: S608
+        try:
+            with _reading(self.path) as conn:
+                found = conn.execute(query, (doc_id,)).fetchone()
+        except (CacheError, sqlite3.Error):
+            return None
+        return attachments_from_json(found[0]) if found is not None else None
 
     def apply(self, info: TableInfo, plan: SyncPlan) -> int:
         """Write a reconcile plan; returns the number of rows touched."""
         if plan.empty:
             return 0
+        self._wait_for_writers()
         layer = self._open(info.table)
         if layer is None:
             raise CacheError(f"table {info.table} is missing")
@@ -665,6 +789,7 @@ class ProjectCache:
         fid: str,
         geometry: str | None,
     ) -> None:
+        self._wait_for_writers()
         if not self.root.is_dir():
             # mkdir(parents=True) ignores `mode` for the parents it creates.
             self.root.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -707,16 +832,23 @@ def _meta_rows(layer: QgsVectorLayer, key: str) -> list[int]:
 
 
 def project_in_file(path: Path) -> Project | None:
-    """The project a cache file belongs to, from its metadata."""
+    """The project a cache file belongs to, from its metadata.
+
+    Raises CacheLocked while another program holds the file."""
     if not Path(path).is_file():
         return None
-    layer = QgsVectorLayer(f"{path}|layername={META_TABLE}", META_TABLE, "ogr")
-    if not layer.isValid():
+    try:
+        with _reading(Path(path)) as conn:
+            found = conn.execute(
+                "SELECT value FROM comapeo_meta WHERE key = 'project'"
+            ).fetchall()
+    except CacheLocked:
+        raise
+    except sqlite3.Error:
         return None
-    request = QgsFeatureRequest().setFilterExpression("\"key\" = 'project'")
-    for feature in layer.getFeatures(request):
+    for (text,) in found:
         try:
-            value = json.loads(feature["value"])
+            value = json.loads(text)
         except (TypeError, ValueError):
             return None
         project_id = value.get("projectId") if isinstance(value, dict) else None
@@ -734,25 +866,40 @@ def project_in_file(path: Path) -> Project | None:
     return None
 
 
-def _unreadable(path: Path) -> bool:
+def _file_version(path: Path) -> tuple[Any, ...] | None:
+    """Changes whenever the file's content may have: in write-ahead-log mode a
+    write lands in the -wal file and leaves the main file as it was."""
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    try:
+        wal = Path(f"{path}-wal").stat()
+        logged: tuple[int, int] | None = (wal.st_mtime_ns, wal.st_size)
+    except OSError:
+        logged = None
+    return (st.st_mtime_ns, st.st_size, logged)
+
+
+def _damaged(path: Path) -> bool | None:
     """Whether SQLite reports the file as no database, a malformed one or one
-    without our metadata; a lock, a permission or a disk problem is not damage."""
+    without our metadata; None when it cannot tell (a lock, a permission or a
+    disk problem), which is not damage."""
     try:
-        conn = sqlite3.connect(
-            f"{path.resolve().as_uri()}?mode=ro", uri=True, timeout=0
-        )
-    except sqlite3.Error:
-        return False
-    try:
-        conn.execute("SELECT key, value FROM comapeo_meta LIMIT 1").fetchall()
+        with _reading(path) as conn:
+            conn.execute("SELECT key, value FROM comapeo_meta LIMIT 1").fetchall()
+    except CacheLocked:
+        return None
     except sqlite3.DatabaseError as err:
         text = str(err).lower()
-        return any(
+        if any(
             words in text
             for words in ("not a database", "malformed", "no such table: comapeo_meta")
-        )
-    finally:
-        conn.close()
+        ):
+            return True
+        return None
+    except sqlite3.Error:
+        return None
     return False
 
 

@@ -6,7 +6,7 @@ import json
 from collections.abc import Callable
 from typing import Any
 
-from qgis.PyQt.QtCore import QObject, pyqtSignal
+from qgis.PyQt.QtCore import QObject, QTimer, pyqtSignal
 
 from ..core.model import (
     LayerDefinition,
@@ -24,12 +24,15 @@ from ..core.protocol import (
     RequestError,
 )
 from ..core.reconcile import Reconciler, layer_schema_key
-from .cache import CacheError, ProjectCache, TableInfo
+from .cache import CacheError, CacheLocked, ProjectCache, TableInfo
 from .transport import LocalApiClient
 
 PAGE_LIMIT = 1000
 IDS_PER_REQUEST = 1000
 MAX_CURSOR_RESTARTS = 3
+# After another program's lock, try again this soon, doubling up to the maximum.
+LOCK_RETRY_MS = 500
+LOCK_RETRY_MAX_MS = 8000
 
 
 class _Fetch:
@@ -97,6 +100,14 @@ class ProjectSync(QObject):
         self.error: str | None = None
         self.warning: str | None = None
         self.refreshing = False
+        # Work set aside because another program held the cache: the schema
+        # step (None) or a layer's fetch. `error` is the lock's while it is set.
+        self._locked: set[str | None] = set()
+        self._lock_error: str | None = None
+        self._retry_ms = LOCK_RETRY_MS
+        self._lock_retry = QTimer(self)
+        self._lock_retry.setSingleShot(True)
+        self._lock_retry.timeout.connect(self._retry_after_lock)
 
     @property
     def connected(self) -> bool:
@@ -121,6 +132,8 @@ class ProjectSync(QObject):
         self._fetches.clear()
         self._pending_full.clear()
         self._staged.clear()
+        self._locked.clear()
+        self._lock_retry.stop()
         self.refreshing = False
         self.statusChanged.emit()
 
@@ -162,6 +175,8 @@ class ProjectSync(QObject):
         self._fetches.clear()
         self._pending_full.clear()
         self._staged.clear()
+        self._locked.clear()
+        self._lock_retry.stop()
         self.refreshing = True
         self.error = None
         self.warning = None
@@ -221,6 +236,7 @@ class ProjectSync(QObject):
             for item in (layers_result or {}).get("layers", [])
             if isinstance(item, dict)
         }
+        self.cache.set_aside_if_damaged()
         try:
             if categories_result != self.cache.raw_categories():
                 self.cache.set_categories(categories_result)
@@ -249,6 +265,9 @@ class ProjectSync(QObject):
                     del self._pending_ids[layer_id]
         except CacheError as err:
             self.refreshing = False
+            if isinstance(err, CacheLocked):
+                self._hit_lock(err, None)
+                return
             self.error = str(err)
             self.statusChanged.emit()
             return
@@ -279,7 +298,20 @@ class ProjectSync(QObject):
                 self._pending_ids[layer_id] = set(rest)
         else:
             return
-        fetch = _Fetch(info, ids, self._generation, self.cache.versions(info), replaces)
+        try:
+            cached = self.cache.versions(info)
+        except CacheError as err:
+            if ids is None:
+                self._pending_full.add(layer_id)
+            else:
+                self._pending_ids.setdefault(layer_id, set()).update(ids)
+            if isinstance(err, CacheLocked):
+                self._hit_lock(err, layer_id)
+                return
+            self.error = str(err)
+            self.statusChanged.emit()
+            return
+        fetch = _Fetch(info, ids, self._generation, cached, replaces)
         self._fetches[layer_id] = fetch
         self.statusChanged.emit()
         self._page(fetch)
@@ -311,12 +343,18 @@ class ProjectSync(QObject):
         if error is not None:
             del self._fetches[layer_id]
             if error.code == INVALID_CURSOR and fetch.restarts < MAX_CURSOR_RESTARTS:
+                try:
+                    cached = self.cache.versions(fetch.info)
+                except CacheError as err:
+                    if isinstance(err, CacheLocked):
+                        self._requeue(fetch)
+                        self._hit_lock(err, layer_id)
+                        return
+                    self.error = str(err)
+                    self.statusChanged.emit()
+                    return
                 again = _Fetch(
-                    fetch.info,
-                    fetch.ids,
-                    fetch.generation,
-                    self.cache.versions(fetch.info),
-                    fetch.replaces,
+                    fetch.info, fetch.ids, fetch.generation, cached, fetch.replaces
                 )
                 again.restarts = fetch.restarts + 1
                 self._fetches[layer_id] = again
@@ -347,6 +385,10 @@ class ProjectSync(QObject):
                     self.cache.commit_table(fetch.info)
         except CacheError as err:
             del self._fetches[layer_id]
+            if isinstance(err, CacheLocked):
+                self._requeue(fetch)
+                self._hit_lock(err, layer_id)
+                return
             self.error = str(err)
             self.statusChanged.emit()
             return
@@ -370,8 +412,47 @@ class ProjectSync(QObject):
             return
         del self._fetches[layer_id]
         self._missing.discard(layer_id)
+        self._lock_gone(layer_id)
         self.statusChanged.emit()
         self._next(layer_id)
+
+    def _requeue(self, fetch: _Fetch) -> None:
+        layer_id = fetch.info.layer_id
+        if fetch.ids is None:
+            self._pending_full.add(layer_id)
+        else:
+            self._pending_ids.setdefault(layer_id, set()).update(fetch.ids)
+
+    def _hit_lock(self, err: CacheLocked, layer_id: str | None) -> None:
+        """Nothing announces that a lock was released, so try again by itself."""
+        self._locked.add(layer_id)
+        self.error = self._lock_error = str(err)
+        self.statusChanged.emit()
+        if not self._lock_retry.isActive():
+            self._lock_retry.start(self._retry_ms)
+            self._retry_ms = min(self._retry_ms * 2, LOCK_RETRY_MAX_MS)
+
+    def _retry_after_lock(self) -> None:
+        if not self.connected:
+            return
+        if None in self._locked:
+            self._restart()
+            return
+        for layer_id in sorted(self._locked):
+            if layer_id in self._fetches:
+                continue
+            if layer_id in self._pending_full or self._pending_ids.get(layer_id):
+                self._next(layer_id)
+            else:
+                self._lock_gone(layer_id)
+
+    def _lock_gone(self, layer_id: str) -> None:
+        if layer_id in self._locked:
+            self._locked.discard(layer_id)
+            if not self._locked and self.error == self._lock_error:
+                self.error = None
+        if not self._locked:
+            self._retry_ms = LOCK_RETRY_MS
 
     def _switch(self, info: TableInfo, old: TableInfo) -> None:
         self._staged.pop(info.layer_id, None)

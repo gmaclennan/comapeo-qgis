@@ -228,8 +228,8 @@ class MediaCache:
         content_type: str | None = None,
     ) -> Path:
         """Move a complete partial file into place as this variant."""
-        path = self.path_for(project_id, attachment, variant, content_type)
         try:
+            path = self.path_for(project_id, attachment, variant, content_type)
             os.replace(partial, path)
         except BaseException:
             partial.unlink(missing_ok=True)

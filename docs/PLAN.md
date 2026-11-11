@@ -102,7 +102,7 @@ Data handling:
 - pytest under QGIS's own Python (`tests/qgis/`, with its own fixtures rather than `pytest-qgis`) in the official QGIS Docker images for 3.44 and 4.x, and in OSGeo4W QGIS 3.44 and 4.x on Windows.
 - End-to-end in CI against the real `@comapeo/local-api` dev server with an in-memory core, on Linux, macOS and, over a named pipe, Windows. CI fails if any of these tests is skipped.
 - Desktop branch: a test in desktop's Playwright suite that switches the setting on and connects a small client, proving listener, secret file and discovery in the real app.
-- Full chain (QGIS → built desktop branch): a scripted local smoke test on a developer Mac, not in CI.
+- Full chain (QGIS → built desktop branch): a scripted local smoke test on a developer Mac (`scripts/desktop-smoke.mjs`), not in CI.
 - Tooling: `pyproject.toml`, ruff, `qgis-plugin-ci` for packaging and release.
 
 ## Milestones

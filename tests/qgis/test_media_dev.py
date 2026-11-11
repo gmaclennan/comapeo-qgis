@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import os
 import urllib.error
 import urllib.request
 
@@ -151,6 +152,8 @@ def test_audio_is_cached_with_its_type_and_played_in_the_panel(plugin, served, o
         wait_until(lambda: opened, message="opened in the system player")
         assert opened[0].name == "original.wav"
         assert opened[0].read_bytes() == http_body(audio["urls"]["original"])
+        if os.environ.get("COMAPEO_REQUIRE_QGIS") == "1":
+            pytest.fail("QtMultimedia is missing, so playback in the panel is untested")
         return
     play = buttons(panel, "playButton")[0]
     play.click()

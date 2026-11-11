@@ -14,7 +14,6 @@ from qgis.core import (
     QgsApplication,
     QgsFeatureRequest,
     QgsMapLayer,
-    QgsMessageLog,
     QgsProject,
     QgsSettings,
     QgsVectorLayer,
@@ -35,6 +34,7 @@ from ..core.model import (
 from ..core.reconcile import layer_schema_key
 from .cache import (
     CacheError,
+    CacheLocked,
     ProjectCache,
     TableInfo,
     cached_files,
@@ -85,6 +85,8 @@ class ProjectStatus:
     complete_refresh: datetime | None = None
     # The cache file exists but cannot be read.
     damaged: bool = False
+    # Another program holds a lock on the cache file, so its details are unknown.
+    locked: bool = False
 
     @property
     def incomplete(self) -> bool:
@@ -96,6 +98,11 @@ class ProjectStatus:
 
     def describe(self) -> str:
         when = format_time(self.last_refresh)
+        if self.locked and not (self.connected and self.error):
+            return (
+                "Another program is using the data cached for this project, so it "
+                "cannot be read just now. The plugin tries again every few seconds."
+            )
         if self.damaged:
             return (
                 "The data cached for this project cannot be read. Use “Remove "
@@ -188,6 +195,8 @@ class Controller(QObject):
             extra=discovery_extra or extra_discovery_locations,
         )
         self._caches: dict[str, ProjectCache] = {}
+        self._file_projects: dict[Path, Project] = {}
+        self._locked_files: set[Path] = set()
         self._syncs: dict[str, ProjectSync] = {}
         self._projects: dict[str, Project] = {}
         self._served: dict[str, str] = {}
@@ -290,7 +299,8 @@ class Controller(QObject):
                 projects.append(project)
         listed = {p.project_id for p in projects}
         for project_id in self.active_projects():
-            if project_id not in listed and self.cache(project_id).is_damaged():
+            # Damaged, or locked by another program before it was first read.
+            if project_id not in listed and self.cache(project_id).exists:
                 projects.append(Project(project_id, self.project_name(project_id)))
         return projects
 
@@ -363,6 +373,7 @@ class Controller(QObject):
             incomplete_layers=tuple(incomplete),
             complete_refresh=min(stamps) if stamps else None,
             damaged=damaged,
+            locked=self.cache(project_id).locked,
         )
 
     def cache(self, project_id: str) -> ProjectCache:
@@ -614,6 +625,9 @@ class Controller(QObject):
     def _poll_projects(self) -> None:
         for build_type, client in self.connector.ready_clients().items():
             self._list_projects(build_type, client, full=False)
+        # Nothing announces that a lock was released; look again.
+        if self._locked_files or any(c.locked for c in self._caches.values()):
+            self.changed.emit()
 
     def _on_projects(
         self,
@@ -650,9 +664,14 @@ class Controller(QObject):
                 self._origins[project_id] = build_type
             self._gone.discard(project_id)
             cache = self.cache(project_id)
-            if full or new or renamed:
+            build = cache.build_type() if cache.exists else None
+            # Under a lock the build is unknown, not different; writing would wait.
+            moved = (
+                serving and cache.exists and not cache.locked and build != build_type
+            )
+            # Before writing: metadata written into a damaged file would hide it.
+            if full or new or renamed or moved:
                 self._set_aside_if_damaged(project_id)
-            moved = serving and cache.exists and cache.build_type() != build_type
             if cache.exists and (full or new or renamed or moved):
                 with contextlib.suppress(CacheError):
                     cache.set_project(project, build_type if serving else None)
@@ -757,24 +776,7 @@ class Controller(QObject):
     def _set_aside_if_damaged(self, project_id: str) -> None:
         """With the app at hand a damaged cache is moved aside and refetched; the
         map layers are pointed at the new tables as they are created."""
-        cache = self.cache(project_id)
-        if not cache.is_damaged():
-            return
-        try:
-            aside = cache.set_aside()
-        except OSError as err:
-            QgsMessageLog.logMessage(
-                f"Cannot move the damaged cache {cache.path} aside: {err}",
-                "CoMapeo",
-                Qgis.MessageLevel.Warning,
-            )
-            return
-        QgsMessageLog.logMessage(
-            f"The cache {cache.path} could not be read; moved it to {aside.name} "
-            "and downloading the project again.",
-            "CoMapeo",
-            Qgis.MessageLevel.Info,
-        )
+        self.cache(project_id).set_aside_if_damaged()
 
     def _on_layers_added(self, layers: list[QgsMapLayer]) -> None:
         touched = set()
@@ -822,10 +824,22 @@ class Controller(QObject):
         return None
 
     def _project_from_file(self, path: Path) -> Project | None:
+        """The last project read from the file while another program locks it."""
         for cache in self._caches.values():
-            if cache.path == path:
+            if cache.path == path and cache.project() is not None:
+                self._locked_files.discard(path)
                 return cache.project()
-        return project_in_file(path)
+        try:
+            project = project_in_file(path)
+        except CacheLocked:
+            self._locked_files.add(path)
+            return self._file_projects.get(path)
+        self._locked_files.discard(path)
+        if project is None:
+            self._file_projects.pop(path, None)
+        else:
+            self._file_projects[path] = project
+        return project
 
     def _on_layers_removed(self, _layer_ids: list[str]) -> None:
         for layer_id in list(self._watched):

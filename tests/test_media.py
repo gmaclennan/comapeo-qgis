@@ -11,7 +11,7 @@ from comapeo_qgis.core.media import (
     classify_status,
     is_media_url,
 )
-from comapeo_qgis.core.model import Attachment, attachments_from_json
+from comapeo_qgis.core.model import Attachment, attachments_from_json, parse_attachments
 
 PHOTO = Attachment(
     type="photo",
@@ -282,3 +282,33 @@ def test_attachments_read_back_from_the_cache_column():
     assert found[0].urls == {"thumbnail": "u"}
     assert attachments_from_json("not json") == ()
     assert attachments_from_json(None) == ()
+
+
+def test_attachments_keep_only_the_known_media_variants():
+    [attachment] = parse_attachments(
+        [
+            {
+                "type": "photo",
+                "key": "k1",
+                "urls": {
+                    "thumbnail": "http://127.0.0.1:1/t",
+                    "huge": "http://127.0.0.1:1/h",
+                    "original": "http://127.0.0.1:1/o",
+                },
+            }
+        ]
+    )
+    assert dict(attachment.urls) == {
+        "thumbnail": "http://127.0.0.1:1/t",
+        "original": "http://127.0.0.1:1/o",
+    }
+
+
+def test_committing_an_unknown_variant_leaves_no_partial_file(tmp_path):
+    cache = MediaCache(tmp_path)
+    partial = cache.partial_file("p", PHOTO, "original")
+    partial.write_bytes(b"data")
+    with pytest.raises(ValueError):
+        cache.commit(partial, "p", PHOTO, "huge", "image/jpeg")
+    assert not partial.exists()
+    assert [p for p in tmp_path.rglob("*") if p.is_file()] == []

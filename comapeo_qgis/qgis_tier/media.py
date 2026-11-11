@@ -23,7 +23,7 @@ from ..core.media import (
     classify_status,
     is_media_url,
 )
-from ..core.model import Attachment, parse_attachments
+from ..core.model import MEDIA_VARIANTS, Attachment, parse_attachments
 
 TRANSFER_TIMEOUT_MS = 60_000
 MAX_PARALLEL = 4
@@ -86,12 +86,13 @@ class MediaFetcher(QObject):
         }
 
     def fetch(self, project_id: str, attachment: Attachment, variant: str) -> bool:
-        """Start a download unless one is running; False if there is no URL to use."""
+        """Start a download unless one is running; False if there is no URL to use
+        or the variant is not one the cache knows."""
         key = (project_id, attachment.key, variant)
         if key in self._jobs:
             return True
         url = attachment.urls.get(variant)
-        if not is_media_url(url):
+        if variant not in MEDIA_VARIANTS or not is_media_url(url):
             return False
         request = QNetworkRequest(QUrl(url))
         request.setAttribute(
@@ -163,7 +164,10 @@ class MediaFetcher(QObject):
         return job.partial
 
     def _complete(self, job: _Job) -> bool:
-        """Whether a 200 body arrived whole; a reply can fail after its headers."""
+        """Whether a 200 body arrived whole; a reply can fail after its headers.
+
+        Without Content-Length only chunked framing marks the end: Qt reports a
+        chunked body cut short as an error, but not one ended by closing."""
         self._on_ready_read(job)
         if (
             job.write_error is not None
@@ -171,10 +175,13 @@ class MediaFetcher(QObject):
         ):
             return False
         length = job.reply.header(QNetworkRequest.KnownHeaders.ContentLengthHeader)
+        if length is None:
+            coding = bytes(job.reply.rawHeader(b"Transfer-Encoding")).lower()
+            return b"chunked" in coding
         try:
-            return length is None or int(length) == job.written
+            return int(length) == job.written
         except (TypeError, ValueError):
-            return True
+            return False
 
     def _on_finished(self, job: _Job) -> None:
         key = (job.project_id, job.attachment.key, job.variant)
@@ -196,7 +203,12 @@ class MediaFetcher(QObject):
             if job.write_error is not None:
                 self._errors[key] = f"Could not save the file: {job.write_error}"
             else:
-                self._errors[key] = job.reply.errorString() or "The download stopped."
+                failed = job.reply.error() != QNetworkReply.NetworkError.NoError
+                self._errors[key] = (
+                    job.reply.errorString()
+                    if failed
+                    else "The app did not mark the end of the file, so it was not kept."
+                )
         else:
             result = classify_status(status)
             partial = self._close(job, keep=result is FetchOutcome.OK)
