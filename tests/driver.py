@@ -115,9 +115,16 @@ class BlockingClient:
         if data and self.sock is not None:
             self._send(data)
 
-    # The stream; tests/qgis/helpers.py swaps in QLocalSocket for named pipes.
+    # The stream: a Unix socket or a named pipe; tests/qgis/helpers.py swaps in
+    # QLocalSocket.
 
     def _open(self, path: str) -> Any:
+        if path.lower().startswith("\\\\.\\pipe\\"):
+            from tests import winpipe
+
+            stream = winpipe.connect(path)
+            stream.settimeout(0.05)
+            return stream
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         sock.settimeout(2)
         try:

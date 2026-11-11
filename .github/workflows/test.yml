@@ -42,7 +42,7 @@ jobs:
       - uses: actions/checkout@v7
       # setup-python has no 3.9 for the newest runner images; uv fetches one.
       - uses: astral-sh/setup-uv@v10.3.3  # no floating major tag
-      - run: uv run --no-project --python ${{ matrix.python }} --with 'pytest>=8' python -m pytest -rs -m "not real_server"
+      - run: uv run --no-project --python ${{ matrix.python }} --with 'pytest>=8' --with pytest-timeout python -m pytest -rs --timeout=120 -m "not real_server"
 
   real-server:
     name: real server / ${{ matrix.os }}
@@ -51,7 +51,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest, macos-latest, windows-latest]
     env:
       COMAPEO_REQUIRE_SERVER: '1'
       COMAPEO_JOB_LABEL: real server / ${{ matrix.os }}
@@ -72,8 +72,8 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
-      - run: python -m pip install 'pytest>=8'
-      - run: python -m pytest -rs -m real_server
+      - run: python -m pip install 'pytest>=8' pytest-timeout
+      - run: python -m pytest -rs --timeout=300 -m real_server
         env:
           COMAPEO_LOCAL_API_DIR: ${{ github.workspace }}/comapeo-local-api
 
@@ -188,4 +188,4 @@ jobs:
       - shell: cmd
         run: C:\OSGeo4W\bin\${{ matrix.python }} -c "from qgis.core import Qgis; print(Qgis.QGIS_VERSION)"
       - shell: cmd
-        run: C:\OSGeo4W\bin\${{ matrix.python }} -m pytest -rs --timeout=300 tests/qgis
+        run: C:\OSGeo4W\bin\${{ matrix.python }} -m pytest -rs --timeout=300

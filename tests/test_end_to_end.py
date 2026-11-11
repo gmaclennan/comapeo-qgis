@@ -1,8 +1,7 @@
-"""The client state machine against a fake server over a real Unix socket."""
+"""The client state machine against a fake server over a real Unix socket or,
+on Windows, a named pipe."""
 
-import os
 import shutil
-import socket
 import struct
 import sys
 import threading
@@ -28,12 +27,13 @@ from tests.driver import BlockingClient, RemoteError
 from tests.fake_server import (
     FakeProject,
     FakeServer,
+    is_pipe,
+    listen,
+    new_endpoint,
     observation,
     short_tempdir,
     track,
 )
-
-pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="AF_UNIX sockets")
 
 _open_clients: list[BlockingClient] = []
 
@@ -237,7 +237,7 @@ def test_oversize_frame_from_server_is_a_protocol_violation(server):
 
 def test_server_close_then_reconnect_with_backoff():
     shared_dir = short_tempdir()
-    shared_path = os.path.join(shared_dir, "api.sock")
+    shared_path = new_endpoint(shared_dir)
     server = FakeServer(socket_path=shared_path).start()
     server.add_project(FakeProject("proj-1", "Rio Negro"))
     client = connect(server)
@@ -267,6 +267,11 @@ def test_server_close_then_reconnect_with_backoff():
         again.close()
         restarted.stop()
         shutil.rmtree(shared_dir, ignore_errors=True)
+
+
+def test_the_fake_server_listens_on_a_named_pipe_on_windows(server):
+    assert is_pipe(server.socket_path) == (sys.platform == "win32")
+    assert isinstance(connect(server).call("projects.list"), dict)
 
 
 def test_discovery_file_leads_to_a_working_connection(server):
@@ -324,10 +329,9 @@ def test_restart_with_a_new_secret_and_socket_is_found_by_rereading_discovery():
 
 def test_a_server_that_accepts_but_never_answers_hello_times_out():
     directory = short_tempdir()
-    path = os.path.join(directory, "api.sock")
-    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    listener.bind(path)
-    listener.listen()
+    path = new_endpoint(directory)
+    listener = listen(path)
+    listener.settimeout(5)
     accepted = []
     thread = threading.Thread(target=lambda: accepted.append(listener.accept()[0]))
     thread.start()
