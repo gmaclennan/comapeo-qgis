@@ -34,6 +34,7 @@ from qgis.core import (
     QgsApplication,
     QgsCoordinateReferenceSystem,
     QgsCoordinateTransformContext,
+    QgsExpression,
     QgsFeature,
     QgsFeatureRequest,
     QgsField,
@@ -55,12 +56,14 @@ from ..core.model import (
     KIND_MAP,
     KIND_REAL,
     KIND_STRING_LIST,
+    Attachment,
     Category,
     ColumnSpec,
     FeatureRecord,
     Geometry,
     LayerDefinition,
     Project,
+    attachments_from_json,
     parse_categories,
     parse_layers,
 )
@@ -540,6 +543,27 @@ class ProjectCache:
             for f in layer.getFeatures(request)
             if isinstance(f[id_field], str) and isinstance(f[version_field], str)
         }
+
+    def attachments(
+        self, info: TableInfo, doc_id: str
+    ) -> tuple[Attachment, ...] | None:
+        """The attachments stored with a document; None if it is not cached.
+
+        Their URLs date from when the row was written; never fetch from them."""
+        layer = self._open(info.table)
+        if layer is None:
+            return None
+        id_field, column = info.field("doc_id"), info.field("attachments")
+        request = QgsFeatureRequest()
+        request.setFilterExpression(
+            QgsExpression.createFieldEqualityExpression(id_field, doc_id)
+        )
+        request.setFlags(Qgis.FeatureRequestFlag.NoGeometry)
+        request.setSubsetOfAttributes([id_field, column], layer.fields())
+        for feature in layer.getFeatures(request):
+            if feature[id_field] == doc_id:
+                return attachments_from_json(feature[column])
+        return None
 
     def apply(self, info: TableInfo, plan: SyncPlan) -> int:
         """Write a reconcile plan; returns the number of rows touched."""
