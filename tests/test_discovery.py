@@ -155,6 +155,25 @@ def test_extra_locations_follow_the_app_folders_each_as_a_build_of_its_own():
     ]
 
 
+@pytest.mark.parametrize(
+    ("platform", "spellings", "key"),
+    [
+        (
+            "linux",
+            ["/dev/data/", "/dev/data", "/dev//data", "/dev/./data"],
+            "/dev/data",
+        ),
+        ("win32", ["C:\\dev\\data\\", "C:/dev/data", "C:\\dev\\data"], "C:\\dev\\data"),
+    ],
+)
+def test_one_extra_location_spelt_several_ways_is_one_build(platform, spellings, key):
+    env = Environment(platform=platform, env={}, home="/h")
+    standard = candidate_paths(Environment(platform=platform, env={}, home="/h"))
+    paths = candidate_paths(env, extra=spellings)[len(standard) :]
+    assert len(paths) == 3
+    assert {c.build_type for c in paths} == {extra_key(key)}
+
+
 def test_windows_extra_locations_are_separated_by_semicolons():
     assert split_locations(r"C:\dev\data;D:\x.json", "win32") == [
         r"C:\dev\data",

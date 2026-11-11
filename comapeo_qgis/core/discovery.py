@@ -169,9 +169,13 @@ def candidate_paths(
     )
     seen = set()
     for location in [*locations, *(e.strip() for e in extra)]:
-        if location and location not in seen:
-            seen.add(location)
-            candidates.extend(_location(environment, extra_key(location), location))
+        if not location:
+            continue
+        # One folder spelt two ways must not become two builds.
+        tidy = str(_flavour(environment, location))
+        if tidy not in seen:
+            seen.add(tidy)
+            candidates.extend(_location(environment, extra_key(tidy), tidy))
     return candidates
 
 
@@ -316,9 +320,13 @@ def _pure(environment: Environment, path: str) -> PurePath:
     expanded = path
     if path == "~" or path[:2] in ("~/", "~\\"):
         expanded = environment.home + path[1:]
+    return _flavour(environment, expanded)
+
+
+def _flavour(environment: Environment, path: str) -> PurePath:
     if environment.platform.startswith("win"):
-        return PureWindowsPath(expanded)
-    return PurePosixPath(expanded)
+        return PureWindowsPath(path)
+    return PurePosixPath(path)
 
 
 def _is_int(value: Any) -> bool:
