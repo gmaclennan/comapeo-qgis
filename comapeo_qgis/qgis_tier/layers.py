@@ -16,7 +16,9 @@ from qgis.core import (
     QgsValueMapFieldFormatter,
     QgsVectorLayer,
 )
-from qgis.gui import QgsDualView
+from qgis.gui import QgsAttributeTableModel
+from qgis.PyQt import sip
+from qgis.PyQt.QtCore import QAbstractTableModel
 from qgis.PyQt.QtGui import QColor
 from qgis.PyQt.QtWidgets import QApplication
 
@@ -199,12 +201,12 @@ def refresh_not_editable(layer: QgsVectorLayer) -> None:
     ):
         return
     for top in QApplication.topLevelWidgets():
-        views = top.findChildren(QgsDualView)
-        if isinstance(top, QgsDualView):
-            views.append(top)
-        for view in views:
-            model = view.masterModel()
-            shown = model.layer() if model is not None else None
+        for found in top.findChildren(QAbstractTableModel):
+            # Tables QGIS itself opens reach Python as plain Qt classes.
+            if found.metaObject().className() != "QgsAttributeTableModel":
+                continue
+            model = sip.cast(found, QgsAttributeTableModel)
+            shown = model.layer()
             if shown is not None and shown.id() == layer.id():
                 model.fieldConditionalStyleChanged(None)
 
