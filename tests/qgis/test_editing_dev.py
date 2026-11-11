@@ -200,6 +200,7 @@ def test_moving_a_point_changes_nothing(plugin, oracle, server):
     assert layer.changeGeometry(
         fid(layer, community), QgsGeometry.fromPointXY(QgsPointXY(-55.0, -2.5))
     )
+    wait_until(lambda: not layer.isModified(), message="the move undone")
     assert layer.commitChanges()
     after = oracle.features("observations")[community]
     assert after["version"] == before["version"]

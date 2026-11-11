@@ -571,14 +571,23 @@ class Run:
         )
         moved = after.get(targets["move"], {})
         self.check(
-            "edit: an attempted move is refused and the point stays",
+            "edit: an attempted move is undone at once and never saved",
             moved.get("version") == before[targets["move"]]["version"]
             and report.get("moveAfter") == report.get("moveBefore")
+            and report.get("moveLeftUnsaved") is False
             and any(
-                "not saved" in t or "Nothing" in t
-                for t in saves.get("move", {}).get("bar", [])
+                "change of location was undone" in m for m in report.get("shown", [])
             ),
-            {"bar": saves.get("move"), "after": report.get("moveAfter")},
+            {"after": report.get("moveAfter"), "shown": report.get("shown")},
+        )
+        shown_rows = report.get("tableRows") or []
+        others = {i for i in shown_rows if not before.get(i, {}).get("editable")}
+        self.check(
+            "edit: the attribute table greys exactly the other device's rows",
+            bool(others)
+            and len(others) < len(shown_rows)
+            and set(report.get("greyRows") or []) == others,
+            {"grey": len(report.get("greyRows") or []), "others": len(others)},
         )
         self.check(
             "edit: a delete reaches CoMapeo",

@@ -1,8 +1,9 @@
 """Runs inside a real QGIS window, started by `scripts/smoke_e2e.py --edit`.
 
 Edits the observations layer with QGIS's own Toggle Editing and Save Layer Edits
-actions, with the attribute table open: a field, a category, an attempted move,
-a delete, and a save of an observation the driver changes in CoMapeo meanwhile.
+actions, with the attribute table open: a field, a category, an attempted move
+(undone at once), a delete, and a save of an observation the driver changes in
+CoMapeo meanwhile. Also reads which rows the open table shows greyed.
 Saves screenshots and a JSON report, then quits. COMAPEO_SMOKE_MEDIA holds the
 document ids the driver picked.
 """
@@ -18,7 +19,8 @@ from pathlib import Path
 from typing import Any
 
 from qgis.core import Qgis, QgsApplication, QgsGeometry, QgsPointXY, QgsProject
-from qgis.PyQt.QtCore import QEventLoop, QTimer
+from qgis.gui import QgsDualView
+from qgis.PyQt.QtCore import QEventLoop, Qt, QTimer
 from qgis.utils import iface, plugins
 
 PLUGIN = "comapeo_qgis"
@@ -151,6 +153,33 @@ def category_field() -> str:
     )
 
 
+def table_rows() -> tuple[list[str], list[str]]:
+    """Ids of the rows in the open attribute table, and of those shown grey."""
+    if not TABLE:
+        return [], []
+    views = TABLE[0].findChildren(QgsDualView)
+    if not views:
+        return [], []
+    model = views[0].masterModel()
+    header = Qt.Orientation.Horizontal
+    names = [
+        model.headerData(c, header, Qt.ItemDataRole.DisplayRole)
+        for c in range(model.columnCount())
+    ]
+    if "ID" not in names or "Notes" not in names:
+        return [], []
+    id_column, notes = names.index("ID"), names.index("Notes")
+    shown, grey = [], []
+    for r in range(model.rowCount()):
+        doc_id = model.data(model.index(r, id_column), Qt.ItemDataRole.DisplayRole)
+        brush = model.data(model.index(r, notes), Qt.ItemDataRole.ForegroundRole)
+        colour = brush.color() if hasattr(brush, "color") else brush
+        shown.append(doc_id)
+        if colour is not None and colour.isValid() and colour.name() == "#8a8a8a":
+            grey.append(doc_id)
+    return shown, grey
+
+
 def toggle_editing() -> None:
     iface.setActiveLayer(layer())
     iface.actionToggleEditing().trigger()
@@ -215,6 +244,7 @@ def run() -> None:
         table.resize(1400, 500)
         TABLE.append(table)
     pump(500)
+    report["tableRows"], report["greyRows"] = table_rows()
 
     step("field")
     toggle_editing()
@@ -242,11 +272,10 @@ def run() -> None:
         QgsGeometry.fromPointXY(QgsPointXY(before.x() + 0.05, before.y() + 0.05)),
     )
     pump(300)
-    save_window("move-attempted")
-    save_edits("move")
     after = row(TARGETS["move"]).geometry().asPoint()
     report["moveAfter"] = [after.x(), after.y()]
-    save_window("move-refused")
+    report["moveLeftUnsaved"] = layer().isModified()
+    save_window("move-undone")
 
     step("delete")
     layer().deleteFeature(fid(TARGETS["delete"]))

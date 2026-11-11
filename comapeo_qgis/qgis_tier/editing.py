@@ -263,14 +263,45 @@ class EditHook(QObject):
             )
 
     def _on_geometry(self, fid: int, _geometry: Any) -> None:
-        if self._muted:
+        if self._muted or fid < 0:
             return
         self._record(fid)
-        self._warn_once(
-            "geometry",
-            "Points cannot be moved from QGIS yet. A change of location will not be "
-            "saved.",
-        )
+        layer = self.layer
+        stack = layer.undoStack()
+        # The change is on the stack once the command or macro that made it ends.
+        pushed = stack.index() + 1
+
+        def undo() -> None:
+            if not layer.isEditable() or fid not in self._moved():
+                return
+            self._muted += 1
+            try:
+                if stack.index() == pushed:
+                    stack.undo()
+            finally:
+                self._muted -= 1
+            self._on_modified()
+            if fid in self._moved():
+                return  # left for the save to drop, with its message
+            self._warn_once(
+                "geometry",
+                "Points cannot be moved from QGIS yet, so the change of location "
+                "was undone.",
+            )
+
+        QTimer.singleShot(0, undo)
+
+    def _moved(self) -> set[int]:
+        """Features whose location in the edit session differs from the cache's."""
+        changed = self.layer.editBuffer().changedGeometries()
+        if not changed:
+            return set()
+        request = QgsFeatureRequest().setFilterFids(list(changed))
+        stored = {
+            f.id(): _wkb(f.geometry())
+            for f in self.layer.dataProvider().getFeatures(request)
+        }
+        return {fid for fid, g in changed.items() if _wkb(g) != stored.get(fid)}
 
     def _on_deleted(self, fid: int) -> None:
         if not self._muted:

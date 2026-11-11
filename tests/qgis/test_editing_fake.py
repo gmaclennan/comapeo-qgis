@@ -193,7 +193,7 @@ def test_save_refused_when_changed_in_comapeo_meanwhile(fake, plugin, iface):
     wait_until(lambda: any("changed in CoMapeo since QGIS" in m for m in plugin.log))
 
 
-def test_moving_a_point_is_never_sent(fake, plugin, iface):
+def test_a_move_saved_before_it_is_undone_is_never_sent(fake, plugin, iface):
     layer = open_layer(fake, plugin)
     before = rows(layer)["o1"].geometry().asPoint()
     assert layer.startEditing()
@@ -201,7 +201,6 @@ def test_moving_a_point_is_never_sent(fake, plugin, iface):
         fid(layer, "o1"), QgsGeometry.fromPointXY(QgsPointXY(1, 2))
     )
     change(layer, "o2", "notes", "kept")
-    wait_until(lambda: any("cannot be moved" in m for m in plugin.log))
     assert layer.commitChanges()
     assert [e["params"]["id"] for e in fake.edits()] == ["o2"]
     assert not any("geometry" in e["params"] for e in fake.edits())
@@ -610,6 +609,28 @@ def test_connection_lost_while_the_large_save_question_is_open(
     assert len(layer.editBuffer().deletedFeatureIds()) == 1
     assert "o4" not in rows(layer)
     assert not layer.editBuffer().addedFeatures()
+
+
+def test_a_moved_point_goes_back_at_once(fake, plugin):
+    layer = open_layer(fake, plugin)
+    before = rows(layer)["o1"].geometry().asWkt()
+    assert layer.startEditing()
+    change(layer, "o2", "notes", "kept")
+    assert layer.changeGeometry(
+        fid(layer, "o1"), QgsGeometry.fromPointXY(QgsPointXY(1, 2))
+    )
+    wait_until(lambda: rows(layer)["o1"].geometry().asWkt() == before, message="back")
+    wait_until(lambda: any("change of location was undone" in m for m in plugin.log))
+    assert plain(rows(layer)["o2"]["notes"]) == "kept"
+    layer.undoStack().redo()
+    pump(100)
+    assert rows(layer)["o1"].geometry().asWkt() == before
+    layer.beginEditCommand("Move")
+    layer.changeGeometry(fid(layer, "o3"), QgsGeometry.fromPointXY(QgsPointXY(5, 6)))
+    layer.endEditCommand()
+    wait_until(lambda: rows(layer)["o3"].geometry().asWkt() != "Point (5 6)")
+    assert layer.commitChanges()
+    assert [e["params"]["id"] for e in fake.edits()] == ["o2"]
 
 
 def test_role_removed_while_the_large_save_question_is_open(
