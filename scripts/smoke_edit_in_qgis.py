@@ -19,8 +19,9 @@ from pathlib import Path
 from typing import Any
 
 from qgis.core import Qgis, QgsApplication, QgsGeometry, QgsPointXY, QgsProject
-from qgis.gui import QgsDualView
-from qgis.PyQt.QtCore import QEventLoop, Qt, QTimer
+from qgis.gui import QgsAttributeTableModel
+from qgis.PyQt import sip
+from qgis.PyQt.QtCore import QAbstractTableModel, QEventLoop, Qt, QTimer
 from qgis.utils import iface, plugins
 
 PLUGIN = "comapeo_qgis"
@@ -157,10 +158,15 @@ def table_rows() -> tuple[list[str], list[str]]:
     """Ids of the rows in the open attribute table, and of those shown grey."""
     if not TABLE:
         return [], []
-    views = TABLE[0].findChildren(QgsDualView)
-    if not views:
+    # QGIS's own table reaches Python as plain Qt classes.
+    models = [
+        sip.cast(m, QgsAttributeTableModel)
+        for m in TABLE[0].findChildren(QAbstractTableModel)
+        if m.metaObject().className() == "QgsAttributeTableModel"
+    ]
+    if not models:
         return [], []
-    model = views[0].masterModel()
+    model = models[0]
     header = Qt.Orientation.Horizontal
     names = [
         model.headerData(c, header, Qt.ItemDataRole.DisplayRole)
@@ -245,6 +251,13 @@ def run() -> None:
         TABLE.append(table)
     pump(500)
     report["tableRows"], report["greyRows"] = table_rows()
+    ask_driver("role", {})
+    wait_until(
+        lambda: all(f["comapeo_editable"] for f in layer().getFeatures()),
+        "every row to be editable as coordinator",
+    )
+    pump(500)
+    report["greyAfterRole"] = table_rows()[1]
 
     step("field")
     toggle_editing()

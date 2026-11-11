@@ -519,15 +519,21 @@ class Run:
         make_profile(self.profiles)
         state: dict[str, Any] = {}
 
+        commands = {
+            "role": "role coordinator",
+            "stale": f"update {targets['stale']}",
+        }
+
         def on_tick() -> None:
-            ask = self.work / "stale.json"
-            if "stale" in state or not ask.exists():
-                return
-            assert self.server is not None
-            state["stale"] = self.server.run(f"update {targets['stale']}")
-            done = self.work / "stale-done.tmp"
-            done.write_text(json.dumps(state["stale"]), encoding="utf-8")
-            done.replace(self.work / "stale-done.json")
+            for name, command in commands.items():
+                ask = self.work / f"{name}.json"
+                if name in state or not ask.exists():
+                    continue
+                assert self.server is not None
+                state[name] = self.server.run(command)
+                done = self.work / f"{name}-done.tmp"
+                done.write_text(json.dumps(state[name]), encoding="utf-8")
+                done.replace(self.work / f"{name}-done.json")
 
         print(f"Launching QGIS {self.args.qgis_version}…")
         report = self.launch("edit", project_id, [], on_tick)
@@ -588,6 +594,11 @@ class Run:
             and len(others) < len(shown_rows)
             and set(report.get("greyRows") or []) == others,
             {"grey": len(report.get("greyRows") or []), "others": len(others)},
+        )
+        self.check(
+            "edit: made coordinator, the open table greys no rows",
+            "role" in state and report.get("greyAfterRole") == [],
+            {"grey": len(report.get("greyAfterRole") or [])},
         )
         self.check(
             "edit: a delete reaches CoMapeo",
