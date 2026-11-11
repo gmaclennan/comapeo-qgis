@@ -251,6 +251,7 @@ def run() -> None:
         TABLE.append(table)
     pump(500)
     report["tableRows"], report["greyRows"] = table_rows()
+    save_table("table-as-member")
     ask_driver("role", {})
     wait_until(
         lambda: all(f["comapeo_editable"] for f in layer().getFeatures()),
