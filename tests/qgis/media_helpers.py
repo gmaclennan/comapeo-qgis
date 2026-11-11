@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from qgis.core import QgsApplication
+from qgis.PyQt.QtGui import QPixmap
 from qgis.PyQt.QtWidgets import QPushButton
 
 from tests.qgis.helpers import rows
@@ -32,3 +33,9 @@ def photo_items(panel) -> list:
 
 def buttons(widget, name: str) -> list[QPushButton]:
     return [b for b in widget.findChildren(QPushButton, name) if not b.isHidden()]
+
+
+def shown_pixmap(label) -> QPixmap | None:
+    """The label's image if it shows one; Qt5 gives None where Qt6 gives a null one."""
+    pixmap = label.pixmap()
+    return pixmap if pixmap is not None and not pixmap.isNull() else None
