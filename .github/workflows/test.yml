@@ -110,16 +110,16 @@ jobs:
         working-directory: comapeo-local-api
       - name: Install pytest beside QGIS's Python
         run: |
-          python3 -m pip install --quiet --target /opt/test-deps 'pytest>=8'
+          python3 -m pip install --quiet --target /opt/test-deps 'pytest>=8' pytest-timeout
           echo "PYTHONPATH=/opt/test-deps${PYTHONPATH:+:$PYTHONPATH}" >> "$GITHUB_ENV"
           echo "COMAPEO_LOCAL_API_DIR=$GITHUB_WORKSPACE/comapeo-local-api" >> "$GITHUB_ENV"
       - run: python3 -c "from qgis.core import Qgis; print(Qgis.QGIS_VERSION)"
-      - run: python3 -m pytest -rs
+      - run: python3 -m pytest -rs --timeout=300
 
   qgis-windows:
     name: QGIS ${{ matrix.package }} (Windows OSGeo4W)
     runs-on: windows-latest
-    timeout-minutes: 60
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -181,11 +181,11 @@ jobs:
         run: |
           # OSGeo4W's environment script resets PATH and PYTHONPATH, so pytest goes
           # into its own Python and Node is named explicitly.
-          & "C:\OSGeo4W\bin\${{ matrix.python }}" -m pip install --quiet --disable-pip-version-check 'pytest>=8'
+          & "C:\OSGeo4W\bin\${{ matrix.python }}" -m pip install --quiet --disable-pip-version-check 'pytest>=8' pytest-timeout
           if ($LASTEXITCODE -ne 0) { throw 'pip failed' }
           "COMAPEO_NODE=$((Get-Command node).Source)" >> $env:GITHUB_ENV
           "COMAPEO_LOCAL_API_DIR=$env:GITHUB_WORKSPACE\comapeo-local-api" >> $env:GITHUB_ENV
       - shell: cmd
         run: C:\OSGeo4W\bin\${{ matrix.python }} -c "from qgis.core import Qgis; print(Qgis.QGIS_VERSION)"
       - shell: cmd
-        run: C:\OSGeo4W\bin\${{ matrix.python }} -m pytest -rs tests/qgis
+        run: C:\OSGeo4W\bin\${{ matrix.python }} -m pytest -rs --timeout=300 tests/qgis
