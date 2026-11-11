@@ -19,6 +19,8 @@ from tests.qgis.helpers import rows
 def home(monkeypatch):
     path = short_tempdir()
     monkeypatch.setenv("HOME", path)
+    monkeypatch.setenv("APPDATA", os.path.join(path, "AppData", "Roaming"))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
     monkeypatch.delenv("COMAPEO_LOCAL_API_DISCOVERY", raising=False)
     QgsSettings().remove(DISCOVERY_SETTING)
     yield path
@@ -26,7 +28,12 @@ def home(monkeypatch):
 
 
 def app_folder(home: str, name: str) -> str:
-    return os.path.join(home, "Library", "Application Support", name)
+    """Where Electron puts each build's userData folder on this platform."""
+    if sys.platform == "darwin":
+        return os.path.join(home, "Library", "Application Support", name)
+    if sys.platform == "win32":
+        return os.path.join(home, "AppData", "Roaming", name)
+    return os.path.join(home, ".config", name)
 
 
 @pytest.fixture
@@ -49,7 +56,6 @@ def plugin(iface):
     instance.unload()
 
 
-@pytest.mark.skipif(sys.platform != "darwin", reason="macOS app folders")
 def test_project_of_a_closed_build_is_not_reported_gone(plugin, servers, home):
     production, development = servers
     p1 = production.add_project(FakeProject("p1", "Production project"))
@@ -87,7 +93,6 @@ def test_project_of_a_closed_build_is_not_reported_gone(plugin, servers, home):
     assert not controller.project_status("p1").gone
 
 
-@pytest.mark.skipif(sys.platform != "darwin", reason="macOS app folders")
 def test_project_left_in_its_own_build_is_reported_gone(plugin, servers):
     production, development = servers
     production.add_project(FakeProject("p1", "Production project"))
