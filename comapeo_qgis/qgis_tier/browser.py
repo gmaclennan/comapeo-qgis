@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import contextlib
 from typing import Any
+from urllib.parse import quote
 
 from qgis.core import (
     Qgis,
@@ -164,7 +165,8 @@ class ServerItem(_Collection):
             name = f"{name} (not connected)"
         # The state is in the path so a refresh replaces the item when it changes.
         state = status.state.value if status else "unknown"
-        path = f"{ROOT_PATH}/{build_type}/{state}"
+        # An extra location's build key is a file path; keep it one path segment.
+        path = f"{ROOT_PATH}/{quote(build_type, safe='')}/{state}"
         super().__init__(parent, name, path, controller, keeper)
         self.build_type = build_type
         self.status = status

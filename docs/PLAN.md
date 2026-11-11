@@ -13,7 +13,7 @@ A QGIS plugin that shows the observations and tracks of a CoMapeo project as lay
 - QGIS and CoMapeo Desktop on the same machine, same operating-system user. macOS, Windows, Linux.
 - QGIS 3.44 (long-term release, Qt5) and 4.x (Qt6) from one codebase. Minimum 3.40.
 - Observations (points) and tracks (lines). Deleted documents left out. Observations with no location kept as rows without geometry.
-- Category icon per observation, category colour for tracks, applied as a default style on add and then left alone. Icons embedded in the QGIS project. "Reset to CoMapeo style" action.
+- Category icon per observation, category colour for tracks (the tracks legend lists only categories in use, since the protocol does not say which categories apply to tracks), applied as a default style on add and then left alone. Icons embedded in the QGIS project. "Reset to CoMapeo style" action.
 - One attribute column per field defined in the project's categories, plus a catch-all column of all tags, plus built-in columns.
 - A CoMapeo side panel: connection status, last updated, refresh, and the selected observation's photos (thumbnails, larger view) and audio.
 - A local cache per CoMapeo project in the QGIS user profile, so layers still show the last data fetched when the app is closed.
@@ -64,7 +64,7 @@ The full contract is `docs/PROTOCOL.md` in the `comapeo-local-api` repo; that fi
 | `subscribe(projectId)`, `unsubscribe(projectId)` | then notifications: `layer.changed` (ids of features created, updated or deleted) and `layer.schemaChanged` (columns or categories changed) |
 | phase 2: `features.update`, `features.delete` | new version, or a conflict / not-permitted error |
 
-There is no notification for projects joined or left, and `hello` does not report the app's build type: the plugin re-lists projects every 10 seconds, and tells builds apart by the app folder its discovery file was found in.
+There is no notification for projects joined or left, and `hello` has no build-type field (its app name carries the build, such as "CoMapeo Desktop Internal"): the plugin re-lists projects every 10 seconds, and tells builds apart by the location its discovery file was found in. Installed builds keep it in their data folder under the system's app-data folder; development builds keep their data in the desktop checkout, so the user lists such locations in the panel or in `COMAPEO_LOCAL_API_DISCOVERY_EXTRA`, and each listed location counts as a build of its own.
 
 A layer is a definition (document type + filter + columns) supplied by the server. Version 1 returns exactly two per project: all observations, all tracks. When CoMapeo standardises its data structures, the server can return more definitions and existing plugins pick them up.
 
@@ -94,6 +94,7 @@ Data handling:
 - Tracks: one line per track with start time, end time and category; per-point timestamps as the geometry's M value.
 - Media: thumbnails and preview-size images cached on demand; originals only on "open original" or "download all media"; no size limit in version 1. A 404 on a known attachment is shown as "not yet synced" and retried on refresh. Video opens in the system player. Audio plays in the panel if playback proves reliable, otherwise opens externally.
 - If a cached project is no longer available in CoMapeo, its layers are marked disconnected and the plugin offers to delete the cached data. It does not delete automatically. "Remove cached data" is always available.
+- A cache file that exists but cannot be read is renamed aside (`<file>.damaged-<time>`) and downloaded again once the app is connected; map layers and their styling stay and are pointed at the new tables. Windows will not rename an open file, so a damaged file the map layers still hold open (a GeoPackage lacking its metadata table) is repaired in place there. Offline, the project is listed with a message naming "Remove cached data".
 
 ## Testing
 

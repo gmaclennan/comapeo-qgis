@@ -103,10 +103,24 @@ def default_renderer(
     return QgsCategorizedSymbolRenderer(info.field("category_id"), entries)
 
 
+def listed_categories(
+    layer: QgsVectorLayer, info: TableInfo, categories: Sequence[Category]
+) -> list[Category]:
+    """The categories a layer's legend lists: all of them for points, only those
+    in use for lines."""
+    if info.definition.geometry_type != GEOMETRY_LINESTRING:
+        return list(categories)
+    # Most categories are for observations, and the protocol does not say which.
+    index = layer.fields().indexOf(info.field("category_id"))
+    used = set(layer.uniqueValues(index)) if index >= 0 else set()
+    return [c for c in categories if c.category_id in used]
+
+
 def apply_default_style(
     layer: QgsVectorLayer, info: TableInfo, categories: Sequence[Category]
 ) -> None:
-    layer.setRenderer(default_renderer(info, categories))
+    listed = listed_categories(layer, info, categories)
+    layer.setRenderer(default_renderer(info, listed))
     layer.triggerRepaint()
 
 
@@ -122,7 +136,7 @@ def append_new_categories(
     present = {c.value() for c in renderer.categories()}
     geometry_type = info.definition.geometry_type
     added = 0
-    for category in categories:
+    for category in listed_categories(layer, info, categories):
         if category.category_id not in present:
             renderer.addCategory(_category(geometry_type, category))
             added += 1

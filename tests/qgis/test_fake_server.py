@@ -154,19 +154,18 @@ def test_feature_that_loses_its_location_keeps_its_row_without_geometry(fake, pl
 
 
 def test_reconnect_refreshes_and_clears_the_stale_badge(plugin):
-    import os
     import shutil
 
-    from tests.fake_server import short_tempdir
+    from tests.fake_server import new_endpoint, short_tempdir
 
     folder = short_tempdir()
-    socket_path = os.path.join(folder, "api.sock")
+    socket_path = new_endpoint(folder)
     first = FakeServer(socket_path=socket_path).start()
     second = None
     try:
         project = first.add_project(FakeProject("p1", "Fake project", layers=[LAYER]))
         project.features["things"] = [thing("a")]
-        use_discovery(first.write_discovery())
+        use_discovery(first.write_discovery(folder))
         plugin.initGui()
         controller = plugin.controller
         wait_until(lambda: controller.available_layers("p1"))

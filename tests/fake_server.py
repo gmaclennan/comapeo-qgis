@@ -1,4 +1,5 @@
-"""A small server implementing PROTOCOL.md version 1 over a real Unix socket.
+"""A small server implementing PROTOCOL.md version 1 over a real Unix socket,
+or a named pipe on Windows.
 
 Written from the protocol document, independently of the client code, so it
 uses its own framing rather than comapeo_qgis.core.framing.
@@ -16,12 +17,11 @@ import secrets
 import shutil
 import socket
 import struct
+import sys
 import tempfile
 import threading
 from dataclasses import dataclass, field
 from typing import Any
-
-import pytest
 
 HANDSHAKE_LIMIT = 4 * 1024
 FRAME_LIMIT = 16 * 1024 * 1024
@@ -32,6 +32,31 @@ SVG_ICON = b'<svg xmlns="http://www.w3.org/2000/svg" width="4" height="4"/>'
 def short_tempdir() -> str:
     # pytest's tmp_path on macOS is too long for a Unix socket path.
     return tempfile.mkdtemp(prefix="cq-", dir="/tmp" if os.name == "posix" else None)
+
+
+def is_pipe(path: str) -> bool:
+    return path.lower().startswith("\\\\.\\pipe\\")
+
+
+def new_endpoint(directory: str) -> str:
+    """A fresh address to listen on: a socket in `directory`, or a named pipe."""
+    if sys.platform == "win32":
+        from tests import winpipe
+
+        return winpipe.new_pipe_name()
+    return os.path.join(directory, "api.sock")
+
+
+def listen(path: str) -> Any:
+    """A listener with accept(), settimeout() and close(), like a socket's."""
+    if is_pipe(path):
+        from tests import winpipe
+
+        return winpipe.PipeListener(path)
+    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    listener.bind(path)
+    listener.listen()
+    return listener
 
 
 def frame(message: Any) -> bytes:
@@ -192,12 +217,12 @@ class FakeServer:
         chunk_size: int | None = None,
         socket_path: str | None = None,
         secret: str | None = None,
+        app_name: str = "CoMapeo Desktop",
     ) -> None:
-        self._own_dir = socket_path is None
-        self.dir = (
-            short_tempdir() if socket_path is None else os.path.dirname(socket_path)
-        )
-        self.socket_path = socket_path or os.path.join(self.dir, "api.sock")
+        self.app_name = app_name
+        self._own_dir = socket_path is None or is_pipe(socket_path)
+        self.dir = short_tempdir() if self._own_dir else os.path.dirname(socket_path)
+        self.socket_path = socket_path or new_endpoint(self.dir)
         self.secret = secret or (
             base64.urlsafe_b64encode(secrets.token_bytes(32)).rstrip(b"=").decode()
         )
@@ -236,7 +261,7 @@ class FakeServer:
                     "secret": self.secret,
                     "protocolVersions": list(self.protocol_versions),
                     "pid": os.getpid(),
-                    "app": {"name": "CoMapeo Desktop", "version": "9.9.9"},
+                    "app": {"name": self.app_name, "version": "9.9.9"},
                 },
                 f,
             )
@@ -244,11 +269,7 @@ class FakeServer:
         return path
 
     def start(self) -> FakeServer:
-        if not hasattr(socket, "AF_UNIX"):
-            pytest.skip("the fake server needs AF_UNIX sockets")
-        listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        listener.bind(self.socket_path)
-        listener.listen()
+        listener = listen(self.socket_path)
         listener.settimeout(0.1)
         self._listener = listener
         thread = threading.Thread(target=self._accept_loop, daemon=True)
@@ -264,8 +285,9 @@ class FakeServer:
         for thread in self._threads:
             thread.join(timeout=2)
         self._threads.clear()
-        with contextlib.suppress(FileNotFoundError):
-            os.unlink(self.socket_path)
+        if not is_pipe(self.socket_path):
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(self.socket_path)
         if self._own_dir:
             shutil.rmtree(self.dir, ignore_errors=True)
 
@@ -368,7 +390,7 @@ class FakeServer:
                 "result": {
                     "protocolVersion": max(shared),
                     "server": {"name": "@comapeo/local-api", "version": "0.0.0"},
-                    "app": {"name": "CoMapeo Desktop", "version": "9.9.9"},
+                    "app": {"name": self.app_name, "version": "9.9.9"},
                 },
             }
         )

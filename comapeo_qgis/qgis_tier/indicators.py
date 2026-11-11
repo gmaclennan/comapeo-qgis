@@ -17,7 +17,7 @@ class StaleIndicators(QObject):
         super().__init__(view)
         self.view = view
         self.controller = controller
-        self._indicators: dict[str, QgsLayerTreeViewIndicator] = {}
+        self._indicators: dict[tuple[str, str], QgsLayerTreeViewIndicator] = {}
         self._timer = QTimer(self)
         self._timer.setSingleShot(True)
         self._timer.setInterval(0)
@@ -39,21 +39,22 @@ class StaleIndicators(QObject):
         return found
 
     def update(self) -> None:
-        wanted: dict[str, str] = {}
-        for layer in comapeo_layers(self.controller.project):
-            project_id = comapeo_ids(layer)[0]
-            if project_id not in wanted:
-                status = self.controller.project_status(project_id)
-                wanted[project_id] = status.describe() if status.stale else ""
+        # One indicator per CoMapeo layer: layers of a project can differ in
+        # whether their first download finished.
+        wanted: dict[tuple[str, str], str] = {}
         for node in self._root.findLayers():
             layer = node.layer()
             ids = comapeo_ids(layer) if layer is not None else None
-            tooltip = wanted.get(ids[0], "") if ids else ""
-            for project_id, indicator in self._indicators.items():
-                if project_id != (ids[0] if ids else None) or not tooltip:
+            key = (ids[0], ids[1]) if ids else None
+            if key is not None and key not in wanted:
+                status = self.controller.layer_status(*key)
+                wanted[key] = status.describe() if status.stale else ""
+            tooltip = wanted.get(key, "") if key is not None else ""
+            for other, indicator in self._indicators.items():
+                if other != key or not tooltip:
                     self._remove(node, indicator)
-            if tooltip and ids:
-                indicator = self._indicator(ids[0])
+            if tooltip and key is not None:
+                indicator = self._indicator(key)
                 indicator.setToolTip(tooltip)
                 if indicator not in self.view.indicators(node):
                     self.view.addIndicator(node, indicator)
@@ -69,12 +70,12 @@ class StaleIndicators(QObject):
                 self._remove(node, indicator)
         self._indicators.clear()
 
-    def _indicator(self, project_id: str) -> QgsLayerTreeViewIndicator:
-        indicator = self._indicators.get(project_id)
+    def _indicator(self, key: tuple[str, str]) -> QgsLayerTreeViewIndicator:
+        indicator = self._indicators.get(key)
         if indicator is None:
             indicator = QgsLayerTreeViewIndicator(self)
             indicator.setIcon(QgsApplication.getThemeIcon("/mIndicatorBadLayer.svg"))
-            self._indicators[project_id] = indicator
+            self._indicators[key] = indicator
         return indicator
 
     def _remove(

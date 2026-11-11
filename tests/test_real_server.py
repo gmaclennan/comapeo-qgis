@@ -7,7 +7,6 @@ Deselect with `-m "not real_server"`.
 
 from __future__ import annotations
 
-import sys
 import urllib.error
 import urllib.request
 
@@ -27,10 +26,7 @@ from comapeo_qgis.core.reconcile import Reconciler
 from tests import dev_server as dev
 from tests.driver import BlockingClient
 
-pytestmark = [
-    pytest.mark.real_server,
-    pytest.mark.skipif(sys.platform == "win32", reason="AF_UNIX sockets"),
-]
+pytestmark = pytest.mark.real_server
 
 OBSERVATIONS = 25
 TRACKS = 3

@@ -10,8 +10,10 @@ from pathlib import Path
 from typing import Any
 
 from qgis.core import (
+    Qgis,
     QgsApplication,
     QgsMapLayer,
+    QgsMessageLog,
     QgsProject,
     QgsSettings,
     QgsVectorLayer,
@@ -20,6 +22,7 @@ from qgis.PyQt.QtCore import QCoreApplication, QEvent, QObject, QTimer, pyqtSign
 
 from ..core.media import MediaCache
 from ..core.model import (
+    GEOMETRY_LINESTRING,
     LayerDefinition,
     Project,
     parse_categories,
@@ -39,6 +42,7 @@ from .cache import (
 )
 from .connection import POLL_INTERVAL_MS, Connector, ServerState, ServerStatus
 from .layers import (
+    GROUP_PROP_PROJECT,
     PROP_LAYER,
     comapeo_ids,
     comapeo_layers,
@@ -56,6 +60,7 @@ from .sync import ProjectSync
 from .transport import LocalApiClient
 
 SETTING_DISCOVERY = "comapeo/discoveryPath"
+SETTING_EXTRA_DISCOVERY = "comapeo/extraDiscoveryPaths"
 PROJECT_POLL_MS = POLL_INTERVAL_MS
 
 
@@ -70,8 +75,16 @@ class ProjectStatus:
     error: str | None
     warning: str | None
     offered: bool = False
-    # Some cached layer has never finished a full fetch.
-    incomplete: bool = False
+    # Titles of the cached layers that have never finished a full fetch.
+    incomplete_layers: tuple[str, ...] = ()
+    # The oldest refresh of the layers that have finished one.
+    complete_refresh: datetime | None = None
+    # The cache file exists but cannot be read.
+    damaged: bool = False
+
+    @property
+    def incomplete(self) -> bool:
+        return bool(self.incomplete_layers)
 
     @property
     def stale(self) -> bool:
@@ -79,31 +92,48 @@ class ProjectStatus:
 
     def describe(self) -> str:
         when = format_time(self.last_refresh)
+        if self.damaged:
+            return (
+                "The data cached for this project cannot be read. Use “Remove "
+                "cached data” to delete it; it is downloaded again once CoMapeo "
+                "Desktop is connected."
+            )
         if self.gone:
-            if self.incomplete:
+            if self.incomplete and self.complete_refresh is None:
                 return (
                     "No longer available in CoMapeo Desktop. The first download "
                     "did not finish, so the cached data is incomplete. You can "
                     "remove the cached data."
                 )
             return (
-                "No longer available in CoMapeo Desktop. Showing data cached "
-                f"{when}. You can remove the cached data."
+                f"No longer available in CoMapeo Desktop. {self._cached()} You can "
+                "remove the cached data."
             )
         if not self.connected:
             if self.offered:
                 return "Not on the map."
-            if self.incomplete:
+            if self.incomplete and self.complete_refresh is None:
                 return (
                     "Not connected. The first download did not finish, so this "
                     "data is incomplete."
                 )
-            return f"Not connected. Showing data cached {when}."
+            return f"Not connected. {self._cached()}"
         if self.error:
             return self.error
         if self.busy:
             return "Updating…"
         return f"Up to date (last updated {when})."
+
+    def _cached(self) -> str:
+        if not self.incomplete:
+            return f"Showing data cached {format_time(self.last_refresh)}."
+        *rest, last = self.incomplete_layers
+        names = f"{', '.join(rest)} and {last}" if rest else last
+        which = "they are" if rest else "that layer is"
+        return (
+            f"Showing data cached {format_time(self.complete_refresh)}. The first "
+            f"download of {names} did not finish, so {which} incomplete."
+        )
 
 
 def format_time(value: datetime | None) -> str:
@@ -133,6 +163,7 @@ class Controller(QObject):
         project: QgsProject | None = None,
         cache_root: Path | None = None,
         discovery_override: Callable[[], str | None] | None = None,
+        discovery_extra: Callable[[], list[str]] | None = None,
         lang: Callable[[], str | None] = default_lang,
         client_version: str = "0.1.0",
         parent: QObject | None = None,
@@ -142,7 +173,10 @@ class Controller(QObject):
         self.cache_root = Path(cache_root) if cache_root else default_cache_root()
         self._lang = lang
         self.connector = Connector(
-            client_version, discovery_override or _setting_override, self
+            client_version,
+            discovery_override or _setting_override,
+            self,
+            extra=discovery_extra or extra_discovery_locations,
         )
         self._caches: dict[str, ProjectCache] = {}
         self._syncs: dict[str, ProjectSync] = {}
@@ -230,18 +264,29 @@ class Controller(QObject):
         ]
 
     def cached_projects(self) -> list[Project]:
+        """Projects with a cache file, including those on the map whose file is
+        damaged, so that their cached data can still be removed."""
         projects = []
         for path in cached_files(self.cache_root):
             project = self._project_from_file(path)
             if project is not None:
                 projects.append(project)
+        listed = {p.project_id for p in projects}
+        for project_id in self.active_projects():
+            if project_id not in listed and self.cache(project_id).is_damaged():
+                projects.append(Project(project_id, self.project_name(project_id)))
         return projects
 
     def project_name(self, project_id: str) -> str:
         project = self._projects.get(project_id)
         if project is None and self.cache(project_id).exists:
             project = self.cache(project_id).project()
-        return (project.name if project else None) or project_id[:8]
+        if project is not None and project.name:
+            return project.name
+        for group in self.project.layerTreeRoot().findGroups(True):
+            if group.customProperty(GROUP_PROP_PROJECT) == project_id and group.name():
+                return group.name()
+        return project_id[:8]
 
     def available_layers(self, project_id: str) -> list[LayerDefinition]:
         catalog = self._catalog.get(project_id)
@@ -263,16 +308,30 @@ class Controller(QObject):
         return sorted(ids)
 
     def project_status(self, project_id: str) -> ProjectStatus:
-        sync = self._syncs.get(project_id)
+        """The project as a whole; the oldest refresh of any of its layers."""
         cache = self.cache(project_id)
+        tables = list(cache.tables().values()) if cache.exists else []
+        return self._status(project_id, tables)
+
+    def layer_status(self, project_id: str, layer_id: str) -> ProjectStatus:
+        """As project_status, but only this layer's download counts."""
+        cache = self.cache(project_id)
+        readable = cache.exists and not cache.is_damaged()
+        info = cache.table(layer_id) if readable else None
+        if info is None:
+            return self.project_status(project_id)
+        return self._status(project_id, [info])
+
+    def _status(self, project_id: str, tables: list[TableInfo]) -> ProjectStatus:
+        sync = self._syncs.get(project_id)
+        damaged = self.cache(project_id).is_damaged()
         stamps = []
-        incomplete = False
-        if cache.exists:
-            for info in cache.tables().values():
-                try:
-                    stamps.append(datetime.fromisoformat(info.last_refresh or ""))
-                except (TypeError, ValueError):
-                    incomplete = True
+        incomplete = []
+        for info in tables:
+            try:
+                stamps.append(datetime.fromisoformat(info.last_refresh or ""))
+            except (TypeError, ValueError):
+                incomplete.append(info.definition.title or info.layer_id)
         return ProjectStatus(
             project_id=project_id,
             name=self.project_name(project_id),
@@ -284,7 +343,9 @@ class Controller(QObject):
             error=sync.error if sync else None,
             warning=sync.warning if sync else None,
             offered=project_id in self._served and sync is None,
-            incomplete=incomplete,
+            incomplete_layers=tuple(incomplete),
+            complete_refresh=min(stamps) if stamps else None,
+            damaged=damaged,
         )
 
     def cache(self, project_id: str) -> ProjectCache:
@@ -341,7 +402,7 @@ class Controller(QObject):
         self.project.removeMapLayers([layer.id() for layer in layers])
         root = self.project.layerTreeRoot()
         for group in root.findGroups(True):
-            if group.customProperty("comapeo/projectId") == project_id:
+            if group.customProperty(GROUP_PROP_PROJECT) == project_id:
                 parent = group.parent()
                 if parent is not None and not group.children():
                     parent.removeChildNode(group)
@@ -374,10 +435,12 @@ class Controller(QObject):
         A stored table is used as it is, even if out of date: the project's sync
         rebuilds it without emptying the map in the meantime."""
         cache = self.cache(project_id)
+        catalog = self._catalog.get(project_id)
+        if catalog is not None:
+            self._set_aside_if_damaged(project_id)
         current = cache.table(layer_id) if cache.exists else None
         if current is not None and cache.is_stored(current):
             return current
-        catalog = self._catalog.get(project_id)
         if catalog is None:
             return current
         layers_result, categories_result = catalog
@@ -469,6 +532,8 @@ class Controller(QObject):
                 self._origins[project_id] = build_type
             self._gone.discard(project_id)
             cache = self.cache(project_id)
+            if full or new or renamed:
+                self._set_aside_if_damaged(project_id)
             moved = serving and cache.exists and cache.build_type() != build_type
             if cache.exists and (full or new or renamed or moved):
                 with contextlib.suppress(CacheError):
@@ -565,10 +630,33 @@ class Controller(QObject):
             sync.projectGone.connect(lambda p=project_id: self._on_gone(p))
             self._syncs[project_id] = sync
         if client is not None and not sync.connected:
+            self._set_aside_if_damaged(project_id)
             sync.attach(client)
         elif client is not None and refresh:
             sync.refresh()
         self.changed.emit()
+
+    def _set_aside_if_damaged(self, project_id: str) -> None:
+        """With the app at hand a damaged cache is moved aside and refetched; the
+        map layers are pointed at the new tables as they are created."""
+        cache = self.cache(project_id)
+        if not cache.is_damaged():
+            return
+        try:
+            aside = cache.set_aside()
+        except OSError as err:
+            QgsMessageLog.logMessage(
+                f"Cannot move the damaged cache {cache.path} aside: {err}",
+                "CoMapeo",
+                Qgis.MessageLevel.Warning,
+            )
+            return
+        QgsMessageLog.logMessage(
+            f"The cache {cache.path} could not be read; moved it to {aside.name} "
+            "and downloading the project again.",
+            "CoMapeo",
+            Qgis.MessageLevel.Info,
+        )
 
     def _on_layers_added(self, layers: list[QgsMapLayer]) -> None:
         touched = set()
@@ -661,8 +749,15 @@ class Controller(QObject):
     # Sync events
 
     def _on_data_changed(self, project_id: str, layer_id: str) -> None:
+        cache = self.cache(project_id)
+        info = cache.table(layer_id)
+        # Tracks list categories as they come into use; points list them all already.
+        kind = info.definition.geometry_type if info is not None else None
+        lines = kind == GEOMETRY_LINESTRING
         for layer in self._layers_of(project_id, layer_id):
             layer.reload()
+            if lines:
+                append_new_categories(layer, info, cache.categories())
             layer.triggerRepaint()
         self.changed.emit()
 
@@ -738,6 +833,19 @@ class Controller(QObject):
         sync = self._syncs.get(project_id)
         if sync is not None:
             sync.detach()
+
+
+def extra_discovery_locations() -> list[str]:
+    """Folders or files from the panel's "Other locations", one per line."""
+    value = QgsSettings().value(SETTING_EXTRA_DISCOVERY, "")
+    if not isinstance(value, str):
+        return []
+    return [line.strip() for line in value.splitlines() if line.strip()]
+
+
+def set_extra_discovery_locations(locations: list[str]) -> None:
+    text = "\n".join(line.strip() for line in locations if line.strip())
+    QgsSettings().setValue(SETTING_EXTRA_DISCOVERY, text)
 
 
 def _setting_override() -> str | None:

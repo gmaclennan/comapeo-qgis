@@ -12,8 +12,10 @@ from qgis.PyQt.QtCore import QObject, QTimer, pyqtSignal
 from ..core.discovery import (
     APP_FOLDERS,
     BUILD_OVERRIDE,
+    EXTRA_PREFIX,
     DiscoveryInfo,
     DiscoveryResult,
+    candidate_paths,
     find_servers,
 )
 from ..core.protocol import (
@@ -27,12 +29,22 @@ from .transport import LocalApiClient
 
 POLL_INTERVAL_MS = 10_000
 
-NOT_RUNNING_MESSAGE = (
-    "CoMapeo Desktop is not running, or QGIS access is switched off in its settings."
-)
+
+def not_running_message(app_name: str = "CoMapeo Desktop") -> str:
+    return f"{app_name} is not running, or QGIS access is switched off in its settings."
+
+
+NOT_RUNNING_MESSAGE = not_running_message()
 
 _BUILD_LABELS = {build: folder for build, folder in APP_FOLDERS}
-_BUILD_LABELS[BUILD_OVERRIDE] = "CoMapeo"
+_BUILD_LABELS[BUILD_OVERRIDE] = "CoMapeo Desktop"
+
+
+def build_label(build_type: str) -> str:
+    """What to call a build before its discovery file or hello names the app."""
+    if build_type.startswith(EXTRA_PREFIX):
+        return f"CoMapeo Desktop in {build_type[len(EXTRA_PREFIX) :]}"
+    return _BUILD_LABELS.get(build_type, "CoMapeo Desktop")
 
 
 class ServerState(Enum):
@@ -89,10 +101,12 @@ class Connector(QObject):
         client_version: str,
         override: Callable[[], str | None] = lambda: None,
         parent: QObject | None = None,
+        extra: Callable[[], list[str]] = lambda: [],
     ) -> None:
         super().__init__(parent)
         self._client_version = client_version
         self._override = override
+        self._extra = extra
         self._clients: dict[str, LocalApiClient] = {}
         self._statuses: dict[str, ServerStatus] = {}
         # Discovery that ended in a version mismatch; not retried until it changes.
@@ -131,7 +145,11 @@ class Connector(QObject):
         if not self._running:
             return
         try:
-            results = find_servers(override=self._override())
+            override, extra = self._override(), self._extra()
+            configured = {
+                c.build_type for c in candidate_paths(override=override, extra=extra)
+            }
+            results = find_servers(override=override, extra=extra)
         except Exception as err:  # never let a bad file stop the plugin
             results = []
             self._statuses = {
@@ -145,6 +163,8 @@ class Connector(QObject):
             self.statusChanged.emit()
             self._schedule(failed=True)
             return
+        for build_type in [b for b in self._clients if b not in configured]:
+            self._forget(build_type)
         seen = set()
         failed = False
         for result in results:
@@ -155,6 +175,13 @@ class Connector(QObject):
                 del self._statuses[build_type]
         self.statusChanged.emit()
         self._schedule(failed=failed or not results)
+
+    def _forget(self, build_type: str) -> None:
+        """Let go of a build whose location is no longer looked in."""
+        client = self._clients.pop(build_type)
+        self._statuses.pop(build_type, None)
+        self._mismatched.pop(build_type, None)
+        client.close()
 
     def _consider(self, result: DiscoveryResult) -> bool:
         """Returns True when this build type still needs another attempt."""
@@ -168,16 +195,15 @@ class Connector(QObject):
             if same:
                 return not client.is_ready
             client.close()
-        label = (
-            (result.info.app_name if result.info else None)
-            or _BUILD_LABELS.get(build_type)
-            or "CoMapeo"
+        label = (result.info.app_name if result.info else None) or build_label(
+            build_type
         )
         if result.error is not None:
             self._set(build_type, ServerState.ERROR, result.error, label)
             return True
         if not result.usable or result.info is None:
-            self._set(build_type, ServerState.NOT_RUNNING, NOT_RUNNING_MESSAGE, label)
+            message = not_running_message(label)
+            self._set(build_type, ServerState.NOT_RUNNING, message, label)
             return True
         if self._mismatched.get(build_type) == result.info:
             return False
@@ -203,7 +229,7 @@ class Connector(QObject):
 
     def _label(self, build_type: str) -> str:
         current = self._statuses.get(build_type)
-        return current.app_name if current else _BUILD_LABELS.get(build_type, "CoMapeo")
+        return current.app_name if current else build_label(build_type)
 
     def _on_ready(self, build_type: str) -> None:
         client = self._clients.get(build_type)
@@ -221,7 +247,10 @@ class Connector(QObject):
         if isinstance(reason, VersionMismatch):
             self._mismatched[build_type] = info
         state, message = describe_failure(reason)
-        self._set(build_type, state, message, self._label(build_type))
+        label = self._label(build_type)
+        if state is ServerState.NOT_RUNNING:
+            message = not_running_message(label)
+        self._set(build_type, state, message, label)
         self.statusChanged.emit()
 
     def _on_closed(
@@ -238,7 +267,7 @@ class Connector(QObject):
             self._set(
                 build_type,
                 ServerState.NOT_RUNNING,
-                NOT_RUNNING_MESSAGE,
+                not_running_message(current.app_name),
                 current.app_name,
             )
         if was_authenticated:

@@ -10,18 +10,20 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 import pytest
 
 from comapeo_qgis.core.discovery import (
-    BUILD_DEVELOPMENT,
     BUILD_INTERNAL,
     BUILD_OVERRIDE,
     BUILD_PRODUCTION,
     BUILD_RC,
     DISCOVERY_FILENAME,
+    ENV_EXTRA,
     ENV_OVERRIDE,
     Environment,
     InvalidDiscoveryFile,
     candidate_paths,
+    extra_key,
     find_servers,
     parse_discovery,
+    split_locations,
 )
 from tests.fake_server import short_tempdir
 
@@ -92,8 +94,8 @@ def test_macos_locations_for_every_build_type():
         BUILD_PRODUCTION: base / "CoMapeo Desktop" / "comapeo",
         BUILD_RC: base / "CoMapeo Desktop RC" / "comapeo",
         BUILD_INTERNAL: base / "CoMapeo Desktop Internal" / "comapeo",
-        BUILD_DEVELOPMENT: base / "CoMapeo Desktop Dev" / "comapeo",
     }
+    assert len(paths) == 6
 
 
 def test_windows_uses_appdata():
@@ -122,15 +124,94 @@ def test_linux_honours_xdg_config_home_only_when_absolute():
 
 def test_override_from_environment_variable_replaces_app_locations():
     env = Environment(platform="darwin", env={ENV_OVERRIDE: "/dev/api"}, home="/h")
-    paths = candidate_paths(env)
-    assert [c.build_type for c in paths] == [BUILD_OVERRIDE, BUILD_OVERRIDE]
+    paths = candidate_paths(env, extra=["/elsewhere"])
+    assert {c.build_type for c in paths} == {BUILD_OVERRIDE}
     assert paths[0].path == PurePosixPath("/dev/api") / DISCOVERY_FILENAME
+    assert paths[1].path == PurePosixPath("/dev/api/comapeo") / DISCOVERY_FILENAME
 
 
 def test_setting_takes_precedence_over_environment_and_may_name_the_file():
     env = Environment(platform="darwin", env={ENV_OVERRIDE: "/env"}, home="/h")
     paths = candidate_paths(env, override="~/dev/server.json")
     assert [c.path for c in paths] == [PurePosixPath("/h/dev/server.json")]
+
+
+def test_extra_locations_follow_the_app_folders_each_as_a_build_of_its_own():
+    env = Environment(
+        platform="darwin", env={ENV_EXTRA: "/env/one: /env/two.json:"}, home="/h"
+    )
+    paths = candidate_paths(env, extra=["~/dev/data", "/env/one", " "])
+    standard = candidate_paths(Environment(platform="darwin", env={}, home="/h"))
+    assert paths[: len(standard)] == standard
+    extra = [(c.build_type, str(c.path)) for c in paths[len(standard) :]]
+    assert extra == [
+        (extra_key("/env/one"), f"/env/one/{DISCOVERY_FILENAME}"),
+        (extra_key("/env/one"), f"/env/one/comapeo/{DISCOVERY_FILENAME}"),
+        (extra_key("/env/one"), "/env/one"),
+        (extra_key("/env/two.json"), "/env/two.json"),
+        (extra_key("~/dev/data"), f"/h/dev/data/{DISCOVERY_FILENAME}"),
+        (extra_key("~/dev/data"), f"/h/dev/data/comapeo/{DISCOVERY_FILENAME}"),
+        (extra_key("~/dev/data"), "/h/dev/data"),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("platform", "spellings", "key"),
+    [
+        (
+            "linux",
+            ["/dev/data/", "/dev/data", "/dev//data", "/dev/./data"],
+            "/dev/data",
+        ),
+        ("win32", ["C:\\dev\\data\\", "C:/dev/data", "C:\\dev\\data"], "C:\\dev\\data"),
+    ],
+)
+def test_one_extra_location_spelt_several_ways_is_one_build(platform, spellings, key):
+    env = Environment(platform=platform, env={}, home="/h")
+    standard = candidate_paths(Environment(platform=platform, env={}, home="/h"))
+    paths = candidate_paths(env, extra=spellings)[len(standard) :]
+    assert len(paths) == 3
+    assert {c.build_type for c in paths} == {extra_key(key)}
+
+
+def test_windows_extra_locations_are_separated_by_semicolons():
+    assert split_locations(r"C:\dev\data;D:\x.json", "win32") == [
+        r"C:\dev\data",
+        r"D:\x.json",
+    ]
+    assert split_locations("/a:/b", "linux") == ["/a", "/b"]
+
+
+def test_a_development_build_is_found_through_its_data_folder():
+    env = Environment(platform="linux", env={}, home="/h")
+    files = {
+        f"/src/desktop/data/default/comapeo/{DISCOVERY_FILENAME}": json.dumps(VALID)
+    }
+    [result] = find_servers(
+        env,
+        extra=["/src/desktop/data/default"],
+        read_file=fake_fs(files),
+        is_alive=always_alive,
+    )
+    assert result.usable
+    assert result.build_type == extra_key("/src/desktop/data/default")
+
+
+def test_an_extra_location_naming_a_running_app_does_not_connect_twice():
+    env = Environment(platform="darwin", env={}, home="/h")
+    folder = "/h/Library/Application Support/CoMapeo Desktop RC/comapeo"
+    other = {**VALID, "socketPath": "/tmp/other.sock"}
+    files = {
+        f"{folder}/{DISCOVERY_FILENAME}": json.dumps(VALID),
+        f"/dev/{DISCOVERY_FILENAME}": json.dumps(other),
+    }
+    results = find_servers(
+        env,
+        extra=[folder, "/dev"],
+        read_file=fake_fs(files),
+        is_alive=always_alive,
+    )
+    assert [r.build_type for r in results] == [BUILD_RC, extra_key("/dev")]
 
 
 def fake_fs(files):
@@ -150,15 +231,15 @@ def test_finds_one_result_per_build_type_and_reports_corrupt_files():
         f"{base}/CoMapeo Desktop/comapeo/{DISCOVERY_FILENAME}": json.dumps(VALID),
         f"{base}/CoMapeo Desktop/{DISCOVERY_FILENAME}": json.dumps(VALID),
         f"{base}/CoMapeo Desktop RC/{DISCOVERY_FILENAME}": "{half",
-        f"{base}/CoMapeo Desktop Dev/comapeo/{DISCOVERY_FILENAME}": PermissionError(
-            13, "Permission denied"
+        f"{base}/CoMapeo Desktop Internal/comapeo/{DISCOVERY_FILENAME}": (
+            PermissionError(13, "Permission denied")
         ),
     }
     results = find_servers(env, read_file=fake_fs(files), is_alive=always_alive)
     assert [(r.build_type, r.usable) for r in results] == [
         (BUILD_PRODUCTION, True),
         (BUILD_RC, False),
-        (BUILD_DEVELOPMENT, False),
+        (BUILD_INTERNAL, False),
     ]
     assert results[0].path.parent.name == "comapeo"
     assert "JSON" in results[1].error

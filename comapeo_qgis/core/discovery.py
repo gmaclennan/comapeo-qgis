@@ -6,7 +6,7 @@ import json
 import os
 import stat
 import sys
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
 from typing import Any
@@ -14,6 +14,7 @@ from typing import Any
 DISCOVERY_FILENAME = "comapeo-local-api.json"
 DISCOVERY_VERSION = 1
 ENV_OVERRIDE = "COMAPEO_LOCAL_API_DISCOVERY"
+ENV_EXTRA = "COMAPEO_LOCAL_API_DISCOVERY_EXTRA"
 MAX_DISCOVERY_FILE_SIZE = 64 * 1024
 # The server's secret is 43 characters; anything far longer cannot be its own.
 MAX_SECRET_LENGTH = 1024
@@ -22,15 +23,16 @@ _MAX_PID = 2**31 - 1
 BUILD_PRODUCTION = "production"
 BUILD_RC = "release-candidate"
 BUILD_INTERNAL = "internal"
-BUILD_DEVELOPMENT = "development"
 BUILD_OVERRIDE = "override"
+EXTRA_PREFIX = "extra:"
 
 # Electron's userData folder is named after the product name of each build type.
+# Development builds keep theirs in the desktop checkout, so only extra
+# locations find them.
 APP_FOLDERS: tuple[tuple[str, str], ...] = (
     (BUILD_PRODUCTION, "CoMapeo Desktop"),
     (BUILD_RC, "CoMapeo Desktop RC"),
     (BUILD_INTERNAL, "CoMapeo Desktop Internal"),
-    (BUILD_DEVELOPMENT, "CoMapeo Desktop Dev"),
 )
 
 
@@ -128,36 +130,72 @@ def app_data_folders(environment: Environment) -> list[PurePath]:
     return [home / ".config"]
 
 
+def split_locations(text: str, platform: str = sys.platform) -> list[str]:
+    """A list of locations as an environment variable holds them (PATH style)."""
+    separator = ";" if platform.startswith("win") else ":"
+    return [part.strip() for part in text.split(separator) if part.strip()]
+
+
+def extra_key(location: str) -> str:
+    """The build key of an extra location: stable while the location is unchanged."""
+    return EXTRA_PREFIX + location
+
+
 def candidate_paths(
-    environment: Environment | None = None, override: str | None = None
+    environment: Environment | None = None,
+    override: str | None = None,
+    extra: Sequence[str] = (),
 ) -> list[Candidate]:
     """Discovery file paths to try, most specific first.
 
     An override (the setting, else the environment variable) may name the file
-    or the folder holding it, and replaces the per-app locations.
+    or the folder holding it, and replaces every other location; tests and the
+    dev server use it. Otherwise the app folders of the installed builds come
+    first, then the extra locations: those in the environment variable, then
+    `extra`. Each extra location is a build of its own, keyed by `extra_key`.
     """
     environment = environment or Environment()
     chosen = override or environment.env.get(ENV_OVERRIDE)
     if chosen:
-        path = _pure(environment, chosen)
-        if path.suffix.lower() == ".json":
-            return [Candidate(BUILD_OVERRIDE, path)]
-        return [
-            Candidate(BUILD_OVERRIDE, path / DISCOVERY_FILENAME),
-            Candidate(BUILD_OVERRIDE, path),
-        ]
+        return _location(environment, BUILD_OVERRIDE, chosen)
     candidates = []
     for base in app_data_folders(environment):
         for build_type, folder in APP_FOLDERS:
             user_data = base / folder
             for directory in (user_data / "comapeo", user_data):
                 candidates.append(Candidate(build_type, directory / DISCOVERY_FILENAME))
+    locations = split_locations(
+        environment.env.get(ENV_EXTRA, ""), environment.platform
+    )
+    seen = set()
+    for location in [*locations, *(e.strip() for e in extra)]:
+        if not location:
+            continue
+        # One folder spelt two ways must not become two builds.
+        tidy = str(_flavour(environment, location))
+        if tidy not in seen:
+            seen.add(tidy)
+            candidates.extend(_location(environment, extra_key(tidy), tidy))
     return candidates
+
+
+def _location(environment: Environment, key: str, location: str) -> list[Candidate]:
+    """A discovery file, or a folder holding one directly or in `comapeo/` (as an
+    app's own userData folder does)."""
+    path = _pure(environment, location)
+    if path.suffix.lower() == ".json":
+        return [Candidate(key, path)]
+    return [
+        Candidate(key, path / DISCOVERY_FILENAME),
+        Candidate(key, path / "comapeo" / DISCOVERY_FILENAME),
+        Candidate(key, path),
+    ]
 
 
 def find_servers(
     environment: Environment | None = None,
     override: str | None = None,
+    extra: Sequence[str] = (),
     *,
     read_file: Callable[[PurePath], bytes | None] | None = None,
     is_alive: Callable[[DiscoveryInfo], bool] | None = None,
@@ -167,21 +205,31 @@ def find_servers(
     Within a build type the first usable file wins; failing that, the first
     file found. Unreadable, corrupt or insecure files are reported with
     `error`; files whose server is evidently gone are reported with
-    `stale=True`. Callers connect only to `usable` results and still treat a
+    `stale=True`. A usable file naming the same socket as an earlier build's
+    is left out, so an extra location that repeats an app folder does not
+    connect twice. Callers connect only to `usable` results and still treat a
     failed connection as "not running".
     """
     environment = environment or Environment()
     read_file = read_file or _read_file
     is_alive = is_alive or (lambda info: _process_looks_alive(info, environment))
     chosen: dict[str, DiscoveryResult] = {}
-    for candidate in candidate_paths(environment, override):
+    for candidate in candidate_paths(environment, override, extra):
         current = chosen.get(candidate.build_type)
         if current is not None and current.usable:
             continue
         result = _examine(candidate, read_file, is_alive)
         if result is not None and (current is None or result.usable):
             chosen[candidate.build_type] = result
-    return list(chosen.values())
+    results: list[DiscoveryResult] = []
+    sockets = set()
+    for result in chosen.values():
+        if result.usable and result.info is not None:
+            if result.info.socket_path in sockets:
+                continue
+            sockets.add(result.info.socket_path)
+        results.append(result)
+    return results
 
 
 def _examine(
@@ -272,9 +320,13 @@ def _pure(environment: Environment, path: str) -> PurePath:
     expanded = path
     if path == "~" or path[:2] in ("~/", "~\\"):
         expanded = environment.home + path[1:]
+    return _flavour(environment, expanded)
+
+
+def _flavour(environment: Environment, path: str) -> PurePath:
     if environment.platform.startswith("win"):
-        return PureWindowsPath(expanded)
-    return PurePosixPath(expanded)
+        return PureWindowsPath(path)
+    return PurePosixPath(path)
 
 
 def _is_int(value: Any) -> bool:
