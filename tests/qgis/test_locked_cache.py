@@ -154,6 +154,30 @@ def test_a_locked_cache_does_not_hold_up_qgis_and_is_read_once_free(
         plugin.unload()
 
 
+def test_selecting_a_feature_offline_while_another_program_locks_the_cache(
+    iface, fake, folder, no_uncaught_exceptions
+):
+    project_file, cache, _styling = save_project_with_layers(iface, fake, folder)
+    fake.stop()
+    plugin = CoMapeoPlugin(iface)
+    try:
+        plugin.initGui()
+        assert QgsProject.instance().read(project_file)
+        wait_until(
+            lambda: panel_text(plugin).startswith("Not connected. Showing data cached")
+        )
+        [observations] = comapeo_map_layers("observations")
+        found = rows(observations)
+        panel = plugin.dock.media_area
+        with held_lock(cache):
+            observations.selectByIds([found["a"].id()])
+            pump(200)
+            assert no_uncaught_exceptions == []
+            assert panel.message.text() == "No photos or audio."
+    finally:
+        plugin.unload()
+
+
 def test_a_locked_cache_with_the_app_connected_is_updated_on_refresh(
     iface, fake, folder
 ):

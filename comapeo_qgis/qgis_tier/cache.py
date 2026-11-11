@@ -689,7 +689,7 @@ class ProjectCache:
         try:
             with _reading(self.path) as conn:
                 found = conn.execute(query, (doc_id,)).fetchone()
-        except sqlite3.Error:
+        except (CacheError, sqlite3.Error):
             return None
         return attachments_from_json(found[0]) if found is not None else None
 
