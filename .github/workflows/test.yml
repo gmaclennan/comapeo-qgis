@@ -10,8 +10,9 @@ permissions:
   contents: read
 
 env:
-  # gmaclennan/comapeo-local-api main; bump to test against a newer server.
-  LOCAL_API_SHA: bbbaf4b1e9c26bf85ae725534ae05bcf82543d9b
+  # gmaclennan/comapeo-local-api feat/editing (its PR #3, not merged yet); bump
+  # to test against a newer server.
+  LOCAL_API_SHA: 72f213393dc6e7a6d3d9ca8db7a541d604c13cae
   QT_QPA_PLATFORM: offscreen
   PYTHONDONTWRITEBYTECODE: '1'
 
