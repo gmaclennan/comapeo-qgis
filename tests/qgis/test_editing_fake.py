@@ -4,6 +4,8 @@ change between connections, an old server)."""
 
 from __future__ import annotations
 
+import threading
+
 import pytest
 from qgis.core import (
     Qgis,
@@ -616,6 +618,64 @@ def test_connection_lost_while_the_large_save_question_is_open(
     assert not layer.editBuffer().addedFeatures()
 
 
+def test_a_late_conflict_stops_a_later_edit_made_on_the_old_version(
+    fake, plugin, iface, monkeypatch
+):
+    monkeypatch.setattr(editing, "SAVE_WAIT_S", 0.3)
+    layer = open_layer(fake, plugin)
+    fake.edit_delay = 1.0
+
+    def changed_in_comapeo(_feature):
+        from_comapeo(served(fake, "o1"))
+        from_comapeo(served(fake, "o2"))
+
+    fake.changes_before_edit = [changed_in_comapeo]
+    assert layer.startEditing()
+    change(layer, "o1", "notes", "first")
+    change(layer, "o2", "notes", "first")
+    assert layer.commitChanges(False)
+    # Before the late reply: the user still sees version 1 of both.
+    change(layer, "o1", "notes", "second")
+    assert layer.deleteFeature(fid(layer, "o2"))
+    wait_until(lambda: any("0 saved, 2 not saved" in m for m in plugin.log))
+    fake.edit_delay = 0
+    assert layer.commitChanges()
+    sent = [
+        (e["method"], e["params"]["id"], e["params"]["version"]) for e in fake.edits()
+    ]
+    assert sent[2:] == [
+        ("features.update", "o1", "o1-v1"),
+        ("features.delete", "o2", "o2-v1"),
+    ]
+    assert served(fake, "o1")["properties"]["notes"] == "from CoMapeo"
+    assert served(fake, "o2") is not None
+
+
+def from_comapeo(feature):
+    feature["version"] = f"{feature['id']}-v2"
+    feature["properties"]["notes"] = "from CoMapeo"
+
+
+def test_the_echo_of_a_save_writes_nothing_more(fake, plugin):
+    layer = open_layer(fake, plugin)
+    writes = []
+    plugin.controller.sync_for("p1").layerDataChanged.connect(
+        lambda layer_id: writes.append(layer_id) if layer_id == "observations" else None
+    )
+    assert layer.startEditing()
+    change(layer, "o1", "notes", "echo")
+    before = len(fake.requests)
+    assert layer.commitChanges()
+    pump(800)
+    fetched = [
+        r["params"].get("ids")
+        for r in fake.requests[before:]
+        if r.get("method") == "layers.getFeatures"
+    ]
+    assert fetched == [["o1"]], "the echo is fetched once, by id"
+    assert len(writes) == 1, writes
+
+
 def test_unloading_with_unsaved_edits_says_they_were_discarded(fake, plugin, iface):
     layer = open_layer(fake, plugin)
     assert layer.startEditing()
@@ -630,6 +690,34 @@ def test_unloading_with_unsaved_edits_says_they_were_discarded(fake, plugin, ifa
         "unsaved changes to 2 observations in Observations were discarded" in m
         for m in plugin.log
     ), plugin.log
+
+
+def test_a_save_before_the_app_has_said_editing_is_still_on_waits(
+    fake, plugin, iface, monkeypatch
+):
+    monkeypatch.setattr(editing, "SAVE_WAIT_S", 1.0)
+    layer = open_layer(fake, plugin)
+    assert layer.startEditing()
+    change(layer, "o1", "notes", "typed before the app went away")
+    fake.allow_edits = False
+    fake.layers_gate = threading.Event()
+    listed = sum(r.get("method") == "layers.list" for r in fake.requests)
+    fake.drop_connections()
+    try:
+        wait_until(
+            lambda: (
+                sum(r.get("method") == "layers.list" for r in fake.requests) > listed
+            ),
+            message="reconnected, layers not yet listed",
+        )
+        assert plugin.controller.client_for("p1") is not None
+        assert not layer.commitChanges()
+        wait_until(lambda: any("Still connecting" in t for t in iface.bar_texts()))
+    finally:
+        fake.layers_gate.set()
+    wait_until(lambda: any("switched off" in m for m in plugin.log))
+    assert fake.edits() == []
+    assert layer.isModified()
 
 
 def test_a_delete_that_another_write_overlapped_is_fetched_again(fake, plugin, iface):
