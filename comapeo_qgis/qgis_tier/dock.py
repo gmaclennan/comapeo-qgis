@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 from qgis.gui import QgsDockWidget
-from qgis.PyQt.QtCore import Qt
+from qgis.PyQt.QtCore import QEvent, QObject, QSize, Qt, QTimer
 from qgis.PyQt.QtWidgets import (
     QHBoxLayout,
+    QHeaderView,
     QInputDialog,
     QLabel,
     QMessageBox,
@@ -58,6 +59,16 @@ class CoMapeoDock(QgsDockWidget):
         self.projects.setObjectName("projectList")
         self.projects.setHeaderLabels(["Project", "Status"])
         self.projects.setRootIsDecorated(False)
+        self.projects.setWordWrap(True)
+        self.projects.setUniformRowHeights(False)
+        header = self.projects.header()
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        header.setStretchLastSection(True)
+        self._fit_timer = QTimer(self)
+        self._fit_timer.setSingleShot(True)
+        self._fit_timer.timeout.connect(self._fit_rows)
+        header.sectionResized.connect(lambda *_: self._fit_timer.start(0))
+        self.projects.viewport().installEventFilter(self)
         self.projects.itemSelectionChanged.connect(self._update_buttons)
         layout.addWidget(self.projects, 1)
         buttons = QHBoxLayout()
@@ -95,7 +106,27 @@ class CoMapeoDock(QgsDockWidget):
             self.projects.addTopLevelItem(item)
             if project_id == selected:
                 item.setSelected(True)
+        self._fit_rows()
         self._update_buttons()
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:
+        # The stretched status column changes width without sectionResized.
+        if event.type() == QEvent.Type.Resize and watched is self.projects.viewport():
+            self._fit_timer.start(0)
+        return super().eventFilter(watched, event)
+
+    def _fit_rows(self) -> None:
+        # QTreeView sizes rows as if unwrapped, so give each status its wrapped height.
+        width = self.projects.header().sectionSize(1) - 8
+        if width <= 0:
+            return
+        metrics = self.projects.fontMetrics()
+        flags = int(Qt.TextFlag.TextWordWrap)
+        for i in range(self.projects.topLevelItemCount()):
+            item = self.projects.topLevelItem(i)
+            text = metrics.boundingRect(0, 0, width, 100_000, flags, item.text(1))
+            item.setSizeHint(1, QSize(width, text.height() + 4))
+        self.projects.doItemsLayout()
 
     def status_text(self) -> str:
         statuses = self.controller.server_statuses
