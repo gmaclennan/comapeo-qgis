@@ -56,13 +56,15 @@ The full contract is `docs/PROTOCOL.md` in the `comapeo-local-api` repo; that fi
 
 | Method | Returns |
 |---|---|
-| `hello` | agreed protocol version, app name/version/build type |
-| `projects.list` | id, name, colour |
+| `hello` | agreed protocol version, server name and version, app name and version |
+| `projects.list` | id, name, colour, description |
 | `layers.list(projectId, lang)` | layer definitions: id, title, document type, geometry type, columns (name, type, label, options) |
-| `layers.getFeatures(projectId, layerId, lang, cursor, ids)` | paged rows: id, version, geometry, column values, attachments with media URLs |
+| `layers.getFeatures(projectId, layerId, lang, limit, cursor, ids)` | paged rows: id, version, geometry, column values, attachments with media URLs |
 | `categories.list(projectId, lang)` | id, name, colour, icon (SVG inline, PNG fallback) |
-| `subscribe(projectId)` | then notifications: `layer.changed` (changed and removed ids), `projects.changed` |
+| `subscribe(projectId)`, `unsubscribe(projectId)` | then notifications: `layer.changed` (ids of features created, updated or deleted) and `layer.schemaChanged` (columns or categories changed) |
 | phase 2: `features.update`, `features.delete` | new version, or a conflict / not-permitted error |
+
+There is no notification for projects joined or left, and `hello` does not report the app's build type: the plugin re-lists projects every 10 seconds, and tells builds apart by the app folder its discovery file was found in.
 
 A layer is a definition (document type + filter + columns) supplied by the server. Version 1 returns exactly two per project: all observations, all tracks. When CoMapeo standardises its data structures, the server can return more definitions and existing plugins pick them up.
 
@@ -80,7 +82,7 @@ The package includes a dev command that serves a generated test project from an 
 Three tiers, kept separate so most logic is testable without QGIS:
 
 - `core/` (no QGIS imports): protocol client state machine, row-to-feature mapping, cache reconciliation (diff of ids and versions), discovery-file lookup.
-- `qgis/`: `QLocalSocket` transport on the main thread, GeoPackage cache and layers, default styling, Browser panel entry (CoMapeo → project → layers; one entry per running build type), side panel, media cache.
+- `qgis_tier/`: `QLocalSocket` transport on the main thread, GeoPackage cache and layers, default styling, Browser panel entry (CoMapeo → project → layers; one entry per running build type), side panel, media cache.
 - Plugin entry point and metadata.
 
 Data handling:
@@ -96,8 +98,8 @@ Data handling:
 ## Testing
 
 - Plain pytest for `core/`.
-- `pytest-qgis` in the official QGIS Docker images for 3.44 and 4.x.
-- End-to-end in CI against the real `@comapeo/local-api` with an in-memory core, including a Windows job.
+- pytest under QGIS's own Python (`tests/qgis/`, with its own fixtures rather than `pytest-qgis`) in the official QGIS Docker images for 3.44 and 4.x, and in OSGeo4W QGIS 3.44 and 4.x on Windows.
+- End-to-end in CI against the real `@comapeo/local-api` dev server with an in-memory core, on Linux, macOS and, over a named pipe, Windows. CI fails if any of these tests is skipped.
 - Desktop branch: a test in desktop's Playwright suite that switches the setting on and connects a small client, proving listener, secret file and discovery in the real app.
 - Full chain (QGIS → built desktop branch): a scripted local smoke test on a developer Mac, not in CI.
 - Tooling: `pyproject.toml`, ruff, `qgis-plugin-ci` for packaging and release.
