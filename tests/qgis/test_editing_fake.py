@@ -6,15 +6,19 @@ from __future__ import annotations
 
 import pytest
 from qgis.core import (
+    Qgis,
+    QgsExpressionContext,
     QgsFeature,
     QgsGeometry,
     QgsPointXY,
+    QgsProject,
     QgsValueMapFieldFormatter,
 )
 from qgis.gui import QgsAttributeForm
-from qgis.PyQt.QtWidgets import QComboBox
+from qgis.PyQt.QtWidgets import QComboBox, QMessageBox
 
 from comapeo_qgis.plugin import CoMapeoPlugin
+from comapeo_qgis.qgis_tier import editing
 from tests.fake_server import FakeProject, FakeServer, observation, track
 from tests.qgis.conftest import pump, record_messages, use_discovery, wait_until
 from tests.qgis.helpers import plain, rows
@@ -288,3 +292,253 @@ def test_old_server_reads_as_read_only(plugin):
         )
     finally:
         server.stop()
+
+
+def test_delete_round_trip(fake, plugin, iface):
+    layer = open_layer(fake, plugin)
+    assert layer.startEditing()
+    assert layer.deleteFeature(fid(layer, "o2"))
+    assert layer.commitChanges()
+    [edit] = fake.edits()
+    assert edit["method"] == "features.delete"
+    assert edit["params"]["version"] == "o2-v1"
+    assert served(fake, "o2") is None
+    assert "o2" not in rows(layer)
+    assert_matches_server(layer, fake)
+
+
+def test_deleted_in_comapeo_meanwhile(fake, plugin):
+    layer = open_layer(fake, plugin)
+    assert layer.startEditing()
+    change(layer, "o1", "notes", "too late")
+    project = fake.projects["p1"]
+    project.features["observations"] = [
+        f for f in project.features["observations"] if f["id"] != "o1"
+    ]
+    project.deleted.add("o1")
+    assert layer.commitChanges()
+    assert "o1" not in rows(layer)
+    wait_until(lambda: any("it was deleted in CoMapeo" in m for m in plugin.log))
+
+
+def test_member_may_change_only_its_own(fake, plugin, iface):
+    fake.role = "member"
+    fake.projects["p1"].others.add("o2")
+    layer = open_layer(fake, plugin)
+    assert layer.startEditing()
+    change(layer, "o2", "notes", "not mine")
+    wait_until(lambda: any("created on another device" in m for m in plugin.log))
+    change(layer, "o1", "notes", "mine")
+    assert layer.commitChanges()
+    assert served(fake, "o1")["properties"]["notes"] == "mine"
+    assert served(fake, "o2")["properties"]["notes"] == "note o2"
+    assert plain(rows(layer)["o2"]["notes"]) == "note o2"
+    assert "1 saved, 1 not saved. The layer shows what CoMapeo holds." in (
+        iface.bar_texts()
+    )
+    wait_until(
+        lambda: any(
+            "Observation o2: created on another device; your role lets you change "
+            "only observations created on this device" in m
+            for m in plugin.log
+        )
+    )
+
+
+def test_rows_become_editable_when_the_role_changes(fake, plugin):
+    fake.role = "member"
+    fake.projects["p1"].others.add("o2")
+    layer = open_layer(fake, plugin)
+    assert rows(layer)["o2"]["comapeo_editable"] is False
+    assert rows(layer)["o1"]["comapeo_editable"] is True
+    [style] = [
+        s
+        for s in layer.conditionalStyles().rowStyles()
+        if s.name() == "CoMapeo: created on another device"
+    ]
+    context = QgsExpressionContext()
+    shown = rows(layer)
+    context.setFeature(shown["o2"])
+    assert style.matches(None, context)
+    context.setFeature(shown["o1"])
+    assert not style.matches(None, context)
+    fake.role = "coordinator"
+    fake.notify("layer.schemaChanged", {"projectId": "p1", "layerId": "observations"})
+    wait_until(lambda: rows(layer)["o2"]["comapeo_editable"] is True)
+
+
+def test_a_value_the_server_refuses_names_the_column(fake, plugin):
+    layer = open_layer(fake, plugin)
+    assert layer.startEditing()
+    change(layer, "o1", "building_type", "barn")
+    assert layer.commitChanges()
+    wait_until(
+        lambda: any(
+            "Building type: value not accepted, not one of the field's options" in m
+            for m in plugin.log
+        )
+    )
+    assert plain(rows(layer)["o1"]["building_type"]) is None
+
+
+def test_another_change_at_the_same_moment_is_reported(fake, plugin):
+    layer = open_layer(fake, plugin)
+    fake.concurrent_next = True
+    assert layer.startEditing()
+    change(layer, "o1", "notes", "racing")
+    assert layer.commitChanges()
+    wait_until(
+        lambda: any(
+            "another change was made at the same moment" in m for m in plugin.log
+        )
+    )
+    wait_until(lambda: rows(layer)["o1"]["comapeo_forks"] == '["edit-2"]')
+
+
+def test_editing_switched_off_mid_session_keeps_the_edits(fake, plugin, iface):
+    layer = open_layer(fake, plugin)
+    assert layer.startEditing()
+    change(layer, "o1", "notes", "kept for later")
+    fake.allow_edits = False
+    fake.drop_connections()
+    controller = plugin.controller
+    wait_until(
+        lambda: (
+            (controller.live_definition("p1", "observations") or None) is not None
+            and controller.live_definition("p1", "observations").editable is False
+        ),
+        message="reconnected with editing off",
+    )
+    wait_until(lambda: any("switched off" in m for m in plugin.log))
+    assert not layer.commitChanges()
+    wait_until(
+        lambda: any(
+            "Not saved. Editing from QGIS is switched off" in t
+            for t in iface.bar_texts()
+        )
+    )
+    assert layer.isModified()
+    assert plain(next(f for f in layer.getFeatures() if f["id"] == "o1")["notes"]) == (
+        "kept for later"
+    )
+    assert fake.edits() == []
+    layer.rollBack()
+    wait_until(lambda: layer.readOnly(), message="read-only once the session ends")
+
+
+def test_role_taken_away_mid_session_keeps_the_edits(fake, plugin, iface):
+    layer = open_layer(fake, plugin)
+    assert layer.startEditing()
+    change(layer, "o1", "notes", "kept")
+    fake.role = "blocked"
+    fake.notify("layer.schemaChanged", {"projectId": "p1", "layerId": "observations"})
+    controller = plugin.controller
+    wait_until(
+        lambda: controller.live_definition("p1", "observations").editable is False
+    )
+    assert not layer.commitChanges()
+    wait_until(
+        lambda: any(
+            "Your role in this project does not allow editing." in t
+            for t in iface.bar_texts()
+        )
+    )
+    assert layer.isModified()
+    assert fake.edits() == []
+
+
+def test_a_slow_save_finishes_later_and_a_second_save_waits(
+    fake, plugin, iface, monkeypatch
+):
+    monkeypatch.setattr(editing, "SAVE_WAIT_S", 0.2)
+    layer = open_layer(fake, plugin)
+    fake.edit_delay = 0.3
+    assert layer.startEditing()
+    change(layer, "o1", "notes", "first")
+    change(layer, "o2", "notes", "second")
+    assert layer.commitChanges(False)
+    assert any(
+        "Still waiting for CoMapeo Desktop to confirm" in t for t in iface.bar_texts()
+    )
+    # An edit to a row whose save is still in flight is based on that save.
+    change(layer, "o1", "notes", "first, again")
+    change(layer, "o3", "notes", "third")
+    assert not layer.commitChanges(False)
+    wait_until(lambda: any("earlier change" in t for t in iface.bar_texts()))
+    assert layer.isModified()
+    wait_until(
+        lambda: any("2 changes saved to CoMapeo." in t for t in iface.bar_texts())
+    )
+    fake.edit_delay = 0
+    wait_until(
+        lambda: len(layer.editBuffer().changedAttributeValues()) == 2,
+        message="edits restored",
+    )
+    assert layer.commitChanges()
+    wait_until(lambda: served(fake, "o3")["properties"]["notes"] == "third")
+    assert served(fake, "o1")["properties"]["notes"] == "first, again"
+    conflicts = [m for m in plugin.log if "changed in CoMapeo since" in m]
+    assert conflicts == []
+    wait_until(lambda: not plugin.controller.sync_for("p1").held("observations"))
+    assert_matches_server(layer, fake)
+
+
+def test_lost_replies_are_checked_once_connected_again(fake, plugin, iface):
+    layer = open_layer(fake, plugin)
+    fake.drop_after_edits = 1
+    assert layer.startEditing()
+    change(layer, "o1", "notes", "answered")
+    change(layer, "o2", "notes", "applied, reply lost")
+    change(layer, "o3", "notes", "never arrived")
+    assert layer.commitChanges()
+    wait_until(
+        lambda: any("closed before confirming 2 changes" in m for m in plugin.log)
+    )
+    wait_until(
+        lambda: any("were saved and" in m for m in plugin.log), message="checked"
+    )
+    [checked] = [m for m in plugin.log if "were saved and" in m]
+    assert "1 were saved and 1 were not" in checked
+    assert "Observation o3 not saved: Notes = 'never arrived'" in checked
+    assert "o2" not in checked
+    assert served(fake, "o2")["properties"]["notes"] == "applied, reply lost"
+    wait_until(lambda: plain(rows(layer)["o2"]["notes"]) == "applied, reply lost")
+
+
+def test_a_large_save_asks_first(fake, plugin, monkeypatch):
+    monkeypatch.setattr(editing, "LARGE_SAVE", 2)
+    answers = []
+
+    def ask(_parent, _title, text, *_args):
+        answers.append(text)
+        return answers_to_give.pop(0)
+
+    answers_to_give = [
+        QMessageBox.StandardButton.Cancel,
+        QMessageBox.StandardButton.Save,
+    ]
+    monkeypatch.setattr(QMessageBox, "question", ask)
+    layer = open_layer(fake, plugin)
+    assert layer.startEditing()
+    for doc_id in ("o1", "o2", "o3"):
+        change(layer, doc_id, "notes", f"bulk {doc_id}")
+    assert not layer.commitChanges(False)
+    assert answers == [
+        "Save 3 changes to CoMapeo? QGIS will wait while CoMapeo Desktop applies them."
+    ]
+    wait_until(lambda: len(layer.editBuffer().changedAttributeValues()) == 3)
+    assert not layer.editBuffer().addedFeatures()
+    assert fake.edits() == []
+    assert layer.commitChanges()
+    assert len(fake.edits()) == 3
+
+
+def test_transaction_groups_stop_editing(fake, plugin):
+    layer = open_layer(fake, plugin)
+    QgsProject.instance().setTransactionMode(Qgis.TransactionMode.AutomaticGroups)
+    try:
+        layer.startEditing()
+        wait_until(lambda: not layer.isEditable(), message="session ended")
+        wait_until(lambda: any("transaction groups" in m for m in plugin.log))
+    finally:
+        QgsProject.instance().setTransactionMode(Qgis.TransactionMode.Disabled)

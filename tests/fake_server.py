@@ -9,9 +9,10 @@ gives. What the dev server cannot be made to do is set on the instance and may
 change at any time: `allow_edits` (None: a server that predates editing, with
 no editing members and no editing methods), `role` ("coordinator", "member" or
 "blocked"), `edit_delay` (seconds before each edit is answered),
-`concurrent_next` (the next edit meets a change landing at the same moment)
-and `changes_before_edit` (callables run inside the next edit, after its checks
-would have passed on the old state: a change from elsewhere).
+`concurrent_next` (the next edit meets a change landing at the same moment),
+`changes_before_edit` (callables run inside the next edit, before the version
+check: a change from elsewhere) and `drop_after_edits` (after that many edits
+are answered, the next is applied and the connection dropped before replying).
 """
 
 from __future__ import annotations
@@ -407,11 +408,12 @@ class FakeServer:
                 )
                 if editing and self.edit_delay:
                     time.sleep(self.edit_delay)
+                reply = self._dispatch(conn, message)
                 limit = self.drop_after_edits
                 if editing and limit is not None and self._edits >= limit:
-                    self._edits += 1
+                    # Applied, but the reply is lost with the connection.
+                    self.drop_after_edits = None
                     raise ConnectionError("dropped by the test")
-                reply = self._dispatch(conn, message)
                 if reply is not None:
                     conn.send(reply)
                 if editing:
