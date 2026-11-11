@@ -12,6 +12,7 @@ from typing import Any
 from qgis.core import (
     Qgis,
     QgsApplication,
+    QgsFeatureRequest,
     QgsMapLayer,
     QgsMessageLog,
     QgsProject,
@@ -187,6 +188,7 @@ class Controller(QObject):
         self._catalog: dict[str, tuple[Any, Any]] = {}
         self._gone: set[str] = set()
         self._watched: dict[str, QgsVectorLayer] = {}
+        self._reloading: set[str] = set()
         self._project_signals: list[tuple[Any, Callable[..., Any]]] = []
         self._started = False
         self.list_errors: dict[str, str] = {}
@@ -731,7 +733,7 @@ class Controller(QObject):
 
     def _on_selection(self, *_args: Any) -> None:
         layer = self.sender()
-        if not isinstance(layer, QgsVectorLayer):
+        if not isinstance(layer, QgsVectorLayer) or layer.id() in self._reloading:
             return
         ids = self._resolved_ids(layer)
         if ids is None:
@@ -753,11 +755,39 @@ class Controller(QObject):
         kind = info.definition.geometry_type if info is not None else None
         lines = kind == GEOMETRY_LINESTRING
         for layer in self._layers_of(project_id, layer_id):
-            layer.reload()
+            if info is None:
+                layer.reload()
+            else:
+                self._reload_keeping_selection(layer, info.field("doc_id"))
             if lines:
                 append_new_categories(layer, info, cache.categories())
             layer.triggerRepaint()
         self.changed.emit()
+
+    def _reload_keeping_selection(self, layer: QgsVectorLayer, id_field: str) -> None:
+        """Reloading drops the user's selection; select the same documents again."""
+        before = {f[id_field] for f in layer.selectedFeatures()}
+        self._reloading.add(layer.id())
+        try:
+            layer.reload()
+            if before:
+                request = QgsFeatureRequest()
+                request.setFlags(Qgis.FeatureRequestFlag.NoGeometry)
+                request.setSubsetOfAttributes([id_field], layer.fields())
+                layer.selectByIds(
+                    [
+                        f.id()
+                        for f in layer.getFeatures(request)
+                        if f[id_field] in before
+                    ]
+                )
+        finally:
+            self._reloading.discard(layer.id())
+        after = {f[id_field] for f in layer.selectedFeatures()}
+        if after != before:
+            ids = self._resolved_ids(layer)
+            if ids is not None:
+                self.selectionChanged.emit(ids[0], ids[1], sorted(after))
 
     def _on_rebuilt(
         self,
