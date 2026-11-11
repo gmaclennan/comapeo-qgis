@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import sqlite3
 import tempfile
 
 import pytest
@@ -71,23 +72,56 @@ def save_project_with_layers(iface, fake, folder) -> tuple[str, str, dict]:
     return project_file, cache, styling
 
 
-def damage(path: str) -> None:
+def damage(path: str, kind: str = "not a database") -> bytes:
+    """Damage the cache as SQLite reports it: as no database, as malformed, or
+    readable but without the plugin's metadata."""
     for suffix in ("-wal", "-shm"):
         if os.path.exists(path + suffix):
             os.remove(path + suffix)
-    with open(path, "wb") as f:
-        f.write(DAMAGED)
+    if kind == "not a database":
+        with open(path, "wb") as f:
+            f.write(DAMAGED)
+    elif kind == "malformed":
+        # Byte 100 is the type of the schema table's first page; 0 is no valid type.
+        with open(path, "r+b") as f:
+            f.seek(100)
+            f.write(b"\x00")
+    else:
+        conn = sqlite3.connect(path)
+        conn.execute("DROP TABLE comapeo_meta")
+        conn.commit()
+        conn.close()
+    with open(path, "rb") as f:
+        damaged = f.read()
+    error = sqlite_error(path)
+    assert error is not None and kind.split()[-1] in error, error
+    return damaged
+
+
+def sqlite_error(path: str) -> str | None:
+    try:
+        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=0)
+    except sqlite3.Error as err:
+        return str(err)
+    try:
+        conn.execute("SELECT key FROM comapeo_meta").fetchall()
+    except sqlite3.Error as err:
+        return str(err)
+    finally:
+        conn.close()
+    return None
 
 
 def moved_aside() -> list[str]:
     return sorted(name for name in os.listdir(cache_root()) if ".damaged-" in name)
 
 
+@pytest.mark.parametrize("kind", ["not a database", "malformed", "no comapeo_meta"])
 def test_a_damaged_cache_is_rebuilt_when_connected_keeping_layers_and_style(
-    iface, fake, folder, monkeypatch
+    iface, fake, folder, monkeypatch, kind
 ):
     project_file, cache, styling = save_project_with_layers(iface, fake, folder)
-    damage(cache)
+    damaged = damage(cache, kind)
 
     plugin = CoMapeoPlugin(iface)
     try:
@@ -97,17 +131,20 @@ def test_a_damaged_cache_is_rebuilt_when_connected_keeping_layers_and_style(
             layer for layer in comapeo_map_layers() if layer.name() == "My observations"
         )
         [tracks] = comapeo_map_layers("tracks")
+        controller = plugin.controller
+        [aside] = wait_until(moved_aside, message="damaged cache set aside")
+        assert aside.startswith(os.path.basename(cache))
+        with open(os.path.join(cache_root(), aside), "rb") as f:
+            assert f.read() == damaged
         wait_until(lambda: observations.isValid() and tracks.isValid(), timeout=30)
         wait_until(lambda: set(rows(observations)) == {"a", "b"})
         wait_until(lambda: set(rows(tracks)) == {"t1"})
+        wait_until(lambda: controller.project_status("p1").last_refresh is not None)
+        assert sqlite_error(cache) is None
         assert observations.renderer().dump() == styling["renderer"]
         assert observations.opacity() == styling["opacity"]
-        [aside] = moved_aside()
-        assert aside.startswith(os.path.basename(cache))
-        with open(os.path.join(cache_root(), aside), "rb") as f:
-            assert f.read() == DAMAGED
-        wait_until(lambda: not plugin.controller.project_status("p1").busy)
-        assert plugin.controller.project_status("p1").error is None
+        assert moved_aside() == [aside]
+        assert controller.project_status("p1").error is None
 
         monkeypatch.setattr(
             QMessageBox,
