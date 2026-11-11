@@ -7,7 +7,6 @@ from __future__ import annotations
 import pytest
 from qgis.core import (
     Qgis,
-    QgsExpressionContext,
     QgsFeature,
     QgsField,
     QgsGeometry,
@@ -23,7 +22,7 @@ from comapeo_qgis.qgis_tier import editing
 from comapeo_qgis.qgis_tier.qt_compat import meta_type
 from tests.fake_server import FakeProject, FakeServer, observation, track
 from tests.qgis.conftest import pump, record_messages, use_discovery, wait_until
-from tests.qgis.helpers import plain, rows
+from tests.qgis.helpers import grey_rows, plain, rows, table_view
 
 DOCS = ["o1", "o2", "o3", "o4"]
 
@@ -347,26 +346,33 @@ def test_member_may_change_only_its_own(fake, plugin, iface):
     )
 
 
-def test_rows_become_editable_when_the_role_changes(fake, plugin):
+def test_the_attribute_table_greys_only_other_devices_rows(fake, plugin, iface):
     fake.role = "member"
     fake.projects["p1"].others.add("o2")
     layer = open_layer(fake, plugin)
-    assert rows(layer)["o2"]["comapeo_editable"] is False
-    assert rows(layer)["o1"]["comapeo_editable"] is True
-    [style] = [
-        s
-        for s in layer.conditionalStyles().rowStyles()
-        if s.name() == "CoMapeo: created on another device"
-    ]
-    context = QgsExpressionContext()
-    shown = rows(layer)
-    context.setFeature(shown["o2"])
-    assert style.matches(None, context)
-    context.setFeature(shown["o1"])
-    assert not style.matches(None, context)
-    fake.role = "coordinator"
-    fake.notify("layer.schemaChanged", {"projectId": "p1", "layerId": "observations"})
-    wait_until(lambda: rows(layer)["o2"]["comapeo_editable"] is True)
+    view = table_view(layer, iface)
+    try:
+        assert grey_rows(view) == {"o2"}
+        assert layer.startEditing()
+        assert grey_rows(table_view(layer, iface)) == {"o2"}
+        layer.rollBack()
+        fake.role = "coordinator"
+        fake.notify(
+            "layer.schemaChanged", {"projectId": "p1", "layerId": "observations"}
+        )
+        wait_until(lambda: rows(layer)["o2"]["comapeo_editable"] is True)
+        wait_until(lambda: grey_rows(view) == set(), message="grey gone")
+    finally:
+        view.deleteLater()
+
+
+def test_a_coordinator_sees_no_grey_rows(fake, plugin, iface):
+    layer = open_layer(fake, plugin)
+    view = table_view(layer, iface)
+    try:
+        assert grey_rows(view) == set()
+    finally:
+        view.deleteLater()
 
 
 def test_a_value_the_server_refuses_names_the_column(fake, plugin):

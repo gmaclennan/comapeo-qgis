@@ -19,7 +19,7 @@ from tests.qgis.conftest import (
     use_discovery,
     wait_until,
 )
-from tests.qgis.helpers import Oracle, plain, rows
+from tests.qgis.helpers import Oracle, grey_rows, plain, rows, table_view
 
 pytestmark = pytest.mark.real_server
 
@@ -281,14 +281,19 @@ def test_delete(plugin, oracle, server):
     assert well not in rows(layer)
 
 
-def test_made_coordinator_can_change_others(plugin, oracle, server):
+def test_made_coordinator_can_change_others(plugin, oracle, server, iface):
     layer = open_observations(plugin, oracle)
     served = oracle.features("observations")
-    other = sorted(i for i, f in served.items() if not f["editable"])[1]
+    others = {i for i, f in served.items() if not f["editable"]}
+    other = sorted(others)[1]
     assert rows(layer)[other]["comapeo_editable"] is False
+    view = table_view(layer, iface)
+    assert grey_rows(view) == others
     server.run("role coordinator")
     try:
         wait_until(lambda: rows(layer)[other]["comapeo_editable"] is True)
+        wait_until(lambda: grey_rows(view) == set(), message="no grey rows")
+        view.deleteLater()
         assert layer.startEditing()
         change(layer, other, "notes", "as coordinator")
         assert layer.commitChanges()

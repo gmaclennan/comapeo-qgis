@@ -57,6 +57,7 @@ from .layers import (
     create_layer,
     point_at,
     project_group,
+    refresh_not_editable,
 )
 from .media import MediaDownload, MediaFetcher
 from .style import (
@@ -1049,6 +1050,7 @@ class Controller(QObject):
                 layer.reload()
             else:
                 self._reload_keeping_selection(layer, info.field("doc_id"))
+                refresh_not_editable(layer)
             if lines:
                 append_new_categories(layer, info, cache.categories())
             layer.triggerRepaint()

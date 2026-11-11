@@ -16,7 +16,9 @@ from qgis.core import (
     QgsValueMapFieldFormatter,
     QgsVectorLayer,
 )
+from qgis.gui import QgsDualView
 from qgis.PyQt.QtGui import QColor
+from qgis.PyQt.QtWidgets import QApplication
 
 from ..core.editing import OP_CATEGORY, column_offered
 from ..core.model import (
@@ -176,12 +178,35 @@ def _mark_not_editable(layer: QgsVectorLayer, info: TableInfo, editing: bool) ->
     styles = layer.conditionalStyles()
     kept = [s for s in styles.rowStyles() if s.name() != NOT_EDITABLE_STYLE]
     if editing and "editable" in info.private:
-        name = info.private["editable"].replace('"', '""')
-        style = QgsConditionalStyle(f'"{name}" IS NOT TRUE')
+        name = info.private["editable"].replace("'", "''")
+        # The attribute table does not load hidden columns, so the flag is read
+        # from the full feature.
+        style = QgsConditionalStyle(
+            f"attribute(get_feature_by_id(@layer, $id), '{name}') IS NOT TRUE"
+        )
         style.setName(NOT_EDITABLE_STYLE)
         style.setTextColor(QColor("#8a8a8a"))
         kept.append(style)
     styles.setRowStyles(kept)
+
+
+def refresh_not_editable(layer: QgsVectorLayer) -> None:
+    """Have open attribute tables work out the grey rows again: they keep the
+    row styles they have computed across a reload, and offer no signal to clear
+    them."""
+    if not any(
+        s.name() == NOT_EDITABLE_STYLE for s in layer.conditionalStyles().rowStyles()
+    ):
+        return
+    for top in QApplication.topLevelWidgets():
+        views = top.findChildren(QgsDualView)
+        if isinstance(top, QgsDualView):
+            views.append(top)
+        for view in views:
+            model = view.masterModel()
+            shown = model.layer() if model is not None else None
+            if shown is not None and shown.id() == layer.id():
+                model.fieldConditionalStyleChanged(None)
 
 
 def _decoded(source: str) -> tuple[str, str, str]:
