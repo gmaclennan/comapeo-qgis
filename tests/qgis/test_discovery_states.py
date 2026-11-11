@@ -111,6 +111,7 @@ def test_corrupt_file_is_reported(plugin, folder):
     assert status.state is ServerState.ERROR
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX file permissions")
 def test_file_other_users_can_read_is_refused(plugin, folder):
     write(folder, json.dumps({"discoveryVersion": 1}), mode=0o644)
     use_discovery(folder)
