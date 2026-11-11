@@ -39,6 +39,14 @@ Type `create`, `update`, `delete` or `category` into the dev server to see live 
 
 `scripts/smoke-e2e.sh --media` checks the photo and audio panel in a real QGIS window the same way, with screenshots prefixed `media-`.
 
+`scripts/desktop-smoke.mjs` runs a similar check against a packaged CoMapeo Desktop build rather than the dev server. It switches "Allow QGIS to Connect" on in the app's settings, creates test data there, and checks that QGIS finds the app through its standard discovery folder, shows a new observation without a refresh, and reads the project as not connected once the app quits. Build an internal desktop first (`out/` in its checkout), then on macOS with Node 24:
+
+```sh
+node scripts/desktop-smoke.mjs --desktop <desktop checkout> --plugin <this repo> --out <dir> --work <dir>
+```
+
+The app and QGIS both run under a throwaway HOME inside `--work`, which is emptied first, so neither touches your own CoMapeo data, keychain or QGIS profile. `--plugin` defaults to this repo.
+
 ## How it works
 
 The plugin finds a running app through its discovery file, connects over a local socket and keeps a GeoPackage per CoMapeo project in the QGIS profile folder (`comapeo/cache/`). Map layers read from that file, so they still show the last data fetched when the app is closed; they are then marked with a badge in the Layers panel and in the CoMapeo panel. A layer whose first download did not finish says so in its own badge; the project's row in the panel names those layers. Layers are styled once, when first added, with one category per CoMapeo category (for tracks, only the categories tracks use, adding others as they appear); "Reset to CoMapeo style" in the layer's context menu restores it.

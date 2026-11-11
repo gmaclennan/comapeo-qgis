@@ -15,6 +15,7 @@ QGIS plugin ("CoMapeo") that shows CoMapeo project data as QGIS layers by talkin
 | Any script under QGIS's Python | `scripts/qgis-python.sh path/to/script.py` |
 | Smoke check in a real QGIS window (macOS) | `scripts/smoke-e2e.sh [--qgis-version 4.0.2]`: dev server, throwaway profile, Browser double-clicks, live update, then the saved project offline; screenshots and reports go to `docs/evidence/` |
 | Media smoke check in a real QGIS window (macOS) | `scripts/smoke-e2e.sh --media --photos 20 --observations 120`: thumbnails, larger view, Open original, not-synced placeholder, audio playback samples, Download all media; files prefixed `media-` |
+| Full chain against a packaged CoMapeo Desktop (macOS) | `node scripts/desktop-smoke.mjs --desktop <checkout with out/> --plugin <this repo> --out <dir> --work <dir>` (Node 24; `desktop_smoke_in_qgis.py` runs inside QGIS); an internal build only, under a throwaway HOME in `--work` |
 
 Everything must pass in `.venv` and under `scripts/qgis-python.sh` before you finish.
 
@@ -58,6 +59,8 @@ tests/qgis/            tests that need QGIS; tests/conftest.py leaves them out e
                        conftest.py has a real-widget iface and `wait_until` (runs the event loop)
 scripts/qgis-python.sh headless runner for the bundled Python of a local QGIS app
 scripts/smoke_e2e.py   drives the real-window smoke check; smoke_in_qgis.py runs inside QGIS (--code)
+                       its throwaway profile turns off QGIS's keychain password helper
+scripts/desktop-smoke.mjs  the same against a packaged CoMapeo Desktop (Playwright)
 ```
 
 ## Rules
