@@ -26,9 +26,21 @@ pytestmark = pytest.mark.real_server
 
 @pytest.fixture(scope="module")
 def server():
+    # The served device creates a tenth of the observations, at least five.
     dev = server_or_skip(
-        observations=25, tracks=2, photos=2, allow_edits=True, as_member=True
+        observations=80, tracks=2, photos=2, allow_edits=True, as_member=True
     )
+    truth = Oracle(dev.discovery_dir)
+    served = truth.features("observations")
+    truth.close()
+    examples = {
+        f["properties"]["notes"][len("An example ") :]: i
+        for i, f in served.items()
+        if f["editable"] and str(f["properties"]["notes"]).startswith("An example")
+    }
+    others = [i for i in dev.run("list own 50")["ids"] if i not in examples.values()]
+    # Chosen once, before any test changes them, so each test has its own.
+    dev.picks = {"examples": examples, "own": others}
     yield dev
     dev.stop()
 
@@ -60,25 +72,15 @@ def open_observations(plugin, oracle):
     return layer
 
 
-def example(oracle, category):
+def example(server, category):
     """The example observation of a category that this device created; the
     dev command makes one of each with every field answered."""
-    return next(
-        f["id"]
-        for f in oracle.features("observations").values()
-        if f["editable"] and f["properties"]["notes"] == f"An example {category}"
-    )
+    return server.picks["examples"][category]
 
 
-def plain_own(server, oracle, index):
+def plain_own(server, index):
     """Another observation this device created, with a location; one per test."""
-    served = oracle.features("observations")
-    ids = [
-        i
-        for i in server.run("list own 20")["ids"]
-        if not str(served[i]["properties"]["notes"]).startswith("An example")
-    ]
-    return ids[index]
+    return server.picks["own"][index]
 
 
 def category_id(oracle, name):
@@ -110,9 +112,9 @@ def assert_row_matches(layer, oracle, doc_id, columns):
 
 def test_each_edit_round_trips(plugin, oracle, server, iface, editor_widgets):
     layer = open_observations(plugin, oracle)
-    plain_one = plain_own(server, oracle, 0)
-    plot = example(oracle, "Survey plot")
-    spring = example(oracle, "Spring")
+    plain_one = plain_own(server, 0)
+    plot = example(server, "Survey plot")
+    spring = example(server, "Spring")
     plant = category_id(oracle, "Plant")
     assert layer.startEditing()
     change(layer, plain_one, "notes", "  checked on site  ")
@@ -150,9 +152,32 @@ def test_each_edit_round_trips(plugin, oracle, server, iface, editor_widgets):
     assert plain(rows(layer)[spring]["category"]) == "Plant"
 
 
-def test_a_value_that_would_change_the_category_is_refused(plugin, oracle):
+def test_only_offered_columns_are_open_in_the_form(plugin, oracle):
     layer = open_observations(plugin, oracle)
-    well = example(oracle, "Well")
+    config = layer.editFormConfig()
+
+    def locked(name):
+        return config.readOnly(layer.fields().indexOf(name))
+
+    # Built-in, all tags, and the date and multiple-choice fields the server
+    # would accept but the plugin does not offer yet.
+    for name in ("id", "created_at", "accuracy", "tags", "visit_date", "threats"):
+        assert locked(name), name
+    for name in ("notes", "plot_area", "plot_quality", "water_source"):
+        assert not locked(name), name
+    private = [n for n in layer.fields().names() if n.startswith("comapeo_")]
+    chooser = [
+        n
+        for n in private
+        if layer.attributeAlias(layer.fields().indexOf(n)) == "Category"
+    ]
+    assert len(chooser) == 1 and not locked(chooser[0])
+    assert all(locked(n) for n in private if n not in chooser)
+
+
+def test_a_value_that_would_change_the_category_is_refused(plugin, oracle, server):
+    layer = open_observations(plugin, oracle)
+    well = example(server, "Well")
     before = oracle.features("observations")[well]
     assert layer.startEditing()
     change(layer, well, "water_source", "spring")
@@ -169,7 +194,7 @@ def test_a_value_that_would_change_the_category_is_refused(plugin, oracle):
 
 def test_moving_a_point_changes_nothing(plugin, oracle, server):
     layer = open_observations(plugin, oracle)
-    community = plain_own(server, oracle, 0)
+    community = plain_own(server, 0)
     before = oracle.features("observations")[community]
     assert layer.startEditing()
     assert layer.changeGeometry(
@@ -185,7 +210,7 @@ def test_moving_a_point_changes_nothing(plugin, oracle, server):
 
 def test_a_stale_save_is_refused_and_the_layer_shows_comapeo(plugin, oracle, server):
     layer = open_observations(plugin, oracle)
-    path = plain_own(server, oracle, 1)
+    path = plain_own(server, 1)
     assert layer.startEditing()
     change(layer, path, "notes", "edited in QGIS")
     server.run(f"update {path}")
@@ -201,7 +226,7 @@ def test_a_stale_save_is_refused_and_the_layer_shows_comapeo(plugin, oracle, ser
 
 def test_a_late_losing_fork_is_refused_then_saved(plugin, oracle, server):
     layer = open_observations(plugin, oracle)
-    hunting = plain_own(server, oracle, 2)
+    hunting = plain_own(server, 2)
     shown = server.run(f"fork-prepare {hunting}")["versionId"]
     wait_until(lambda: rows(layer)[hunting]["comapeo_version"] == shown)
     assert layer.startEditing()
@@ -231,7 +256,7 @@ def test_a_member_is_refused_on_another_devices_observation(
     layer = open_observations(plugin, oracle)
     served = oracle.features("observations")
     other = sorted(i for i, f in served.items() if not f["editable"])[0]
-    spring = plain_own(server, oracle, 3)
+    spring = plain_own(server, 3)
     assert layer.startEditing()
     change(layer, other, "notes", "not mine to change")
     change(layer, spring, "notes", "mine to change")
@@ -248,7 +273,7 @@ def test_a_member_is_refused_on_another_devices_observation(
 
 def test_delete(plugin, oracle, server):
     layer = open_observations(plugin, oracle)
-    well = plain_own(server, oracle, 4)
+    well = plain_own(server, 4)
     assert layer.startEditing()
     assert layer.deleteFeature(fid(layer, well))
     assert layer.commitChanges()

@@ -9,6 +9,7 @@ from qgis.core import (
     Qgis,
     QgsExpressionContext,
     QgsFeature,
+    QgsField,
     QgsGeometry,
     QgsPointXY,
     QgsProject,
@@ -19,6 +20,7 @@ from qgis.PyQt.QtWidgets import QComboBox, QMessageBox
 
 from comapeo_qgis.plugin import CoMapeoPlugin
 from comapeo_qgis.qgis_tier import editing
+from comapeo_qgis.qgis_tier.qt_compat import meta_type
 from tests.fake_server import FakeProject, FakeServer, observation, track
 from tests.qgis.conftest import pump, record_messages, use_discovery, wait_until
 from tests.qgis.helpers import plain, rows
@@ -450,9 +452,9 @@ def test_role_taken_away_mid_session_keeps_the_edits(fake, plugin, iface):
 def test_a_slow_save_finishes_later_and_a_second_save_waits(
     fake, plugin, iface, monkeypatch
 ):
-    monkeypatch.setattr(editing, "SAVE_WAIT_S", 0.2)
+    monkeypatch.setattr(editing, "SAVE_WAIT_S", 0.3)
     layer = open_layer(fake, plugin)
-    fake.edit_delay = 0.3
+    fake.edit_delay = 1.0
     assert layer.startEditing()
     change(layer, "o1", "notes", "first")
     change(layer, "o2", "notes", "second")
@@ -542,3 +544,36 @@ def test_transaction_groups_stop_editing(fake, plugin):
         wait_until(lambda: any("transaction groups" in m for m in plugin.log))
     finally:
         QgsProject.instance().setTransactionMode(Qgis.TransactionMode.Disabled)
+
+
+def test_columns_stay_editable_after_a_rebuild_during_a_session(fake, plugin):
+    layer = open_layer(fake, plugin)
+    assert layer.startEditing()
+    project = fake.projects["p1"]
+    project.layers[0]["schemaVersion"] = "s2"
+    project.layers[0]["columns"].insert(
+        3, {"name": "owner", "type": "string", "label": "Owner", "role": "field"}
+    )
+    fake.notify("layer.schemaChanged", {"projectId": "p1", "layerId": "observations"})
+    wait_until(lambda: "owner" in layer.fields().names(), message="rebuilt")
+    notes = layer.fields().indexOf("notes")
+    wait_until(lambda: not layer.editFormConfig().readOnly(notes))
+    change(layer, "o1", "notes", "after the rebuild")
+    assert layer.commitChanges()
+    assert served(fake, "o1")["properties"]["notes"] == "after the rebuild"
+
+
+def test_a_column_added_in_the_session_is_discarded(fake, plugin):
+    layer = open_layer(fake, plugin)
+    assert layer.startEditing()
+    assert layer.addAttribute(QgsField("extra", meta_type("QString")))
+    change(layer, "o1", "notes", "kept")
+    assert layer.commitChanges(False)
+    assert [e["params"]["properties"] for e in fake.edits()] == [{"notes": "kept"}]
+    wait_until(lambda: any("Column changes are not supported" in m for m in plugin.log))
+    wait_until(lambda: "extra" not in layer.fields().names())
+    wait_until(lambda: layer.isEditable() and not layer.isModified())
+    change(layer, "o2", "notes", "and again")
+    assert layer.commitChanges()
+    assert served(fake, "o2")["properties"]["notes"] == "and again"
+    assert "extra" not in layer.dataProvider().fields().names()
