@@ -9,6 +9,7 @@ import sqlite3
 import tempfile
 import time
 from collections.abc import Iterator
+from pathlib import Path
 
 import pytest
 from qgis.core import QgsBrowserModel, QgsProject
@@ -16,6 +17,7 @@ from qgis.PyQt.QtCore import QModelIndex
 from qgis.PyQt.QtWidgets import QMessageBox
 
 from comapeo_qgis.plugin import CoMapeoPlugin
+from comapeo_qgis.qgis_tier import cache as cache_module
 from comapeo_qgis.qgis_tier.cache import ProjectCache
 from tests.fake_server import FakeProject, FakeServer, observation, track
 from tests.qgis.conftest import (
@@ -259,3 +261,22 @@ def test_a_cache_another_program_holds_is_not_taken_for_damage(
         assert time.monotonic() - started < 2
     assert moved_aside() == []
     assert sqlite_error(cache) is None
+
+
+def test_copies_set_aside_within_one_second_are_all_kept(monkeypatch, folder):
+    class Frozen(cache_module.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2026, 11, 11, 9, 30, 0, tzinfo=tz)
+
+    monkeypatch.setattr(cache_module, "datetime", Frozen)
+    cache = ProjectCache(Path(folder), "p1")
+    names = []
+    for copy in range(3):
+        cache.path.write_bytes(b"copy %d" % copy)
+        names.append(cache.set_aside().name)
+    assert len(set(names)) == 3
+    kept = {(cache.path.parent / name).read_bytes() for name in names}
+    assert kept == {b"copy 0", b"copy 1", b"copy 2"}
+    cache.remove()
+    assert os.listdir(folder) == []

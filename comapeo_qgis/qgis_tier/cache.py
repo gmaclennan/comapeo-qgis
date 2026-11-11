@@ -273,7 +273,12 @@ class ProjectCache:
         """Rename the file (and SQLite's side files) out of the way, so a fresh
         cache can be built; the old one is kept for anyone who wants to look."""
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        aside = self.path.with_name(f"{self.path.name}.damaged-{stamp}")
+        name = f"{self.path.name}.damaged-{stamp}"
+        aside = self.path.with_name(name)
+        count = 1
+        while aside.exists():
+            count += 1
+            aside = self.path.with_name(f"{name}-{count}")
         self.close()
         os.replace(self.path, aside)
         for suffix in ("-wal", "-shm", "-journal"):
