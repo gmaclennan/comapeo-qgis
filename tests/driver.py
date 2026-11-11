@@ -20,9 +20,10 @@ from comapeo_qgis.core.protocol import (
 
 
 class RemoteError(Exception):
-    def __init__(self, code: str, message: str) -> None:
+    def __init__(self, code: str, message: str, data: Any = None) -> None:
         super().__init__(f"{code}: {message}")
         self.code = code
+        self.data = data
 
 
 class BlockingClient:
@@ -64,7 +65,7 @@ class BlockingClient:
             )
         )
         if isinstance(event, RequestFailed):
-            raise RemoteError(event.error.code, event.error.message)
+            raise RemoteError(event.error.code, event.error.message, event.error.data)
         assert isinstance(event, Response)
         return event.result
 

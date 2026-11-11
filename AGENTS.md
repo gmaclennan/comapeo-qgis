@@ -15,6 +15,7 @@ QGIS plugin ("CoMapeo") that shows CoMapeo project data as QGIS layers by talkin
 | Any script under QGIS's Python | `scripts/qgis-python.sh path/to/script.py` |
 | Smoke check in a real QGIS window (macOS) | `scripts/smoke-e2e.sh [--qgis-version 4.0.2]`: dev server, throwaway profile, Browser double-clicks, live update, then the saved project offline; screenshots and reports go to `docs/evidence/` |
 | Media smoke check in a real QGIS window (macOS) | `scripts/smoke-e2e.sh --media --photos 20 --observations 120`: thumbnails, larger view, Open original, not-synced placeholder, audio playback samples, Download all media; files prefixed `media-` |
+| Editing smoke check in a real QGIS window (macOS) | `scripts/smoke-e2e.sh --edit --out <dir>`: a dev server with editing allowed, as a member; a field, a category, an attempted move (undone at once), a delete and a stale save, and which rows the open table greys, before and after the member is made coordinator through QGIS's own Toggle Editing and Save Layer Edits; files prefixed `edit-` |
 | Full chain against a packaged CoMapeo Desktop (macOS) | `node scripts/desktop-smoke.mjs --desktop <checkout with out/> --plugin <this repo> --out <dir> --work <dir>` (Node 24; `desktop_smoke_in_qgis.py` runs inside QGIS); an internal build only, under a throwaway HOME in `--work` |
 
 Everything must pass in `.venv` and under `scripts/qgis-python.sh` before you finish.
@@ -33,14 +34,17 @@ comapeo_qgis/          the plugin package (what gets zipped and installed)
     protocol.py        client state machine (bytes in, bytes and events out)
     discovery.py       finding discovery files per build type and OS, plus extra locations
     model.py           API results to neutral records (fields, features, categories)
-    reconcile.py       cache diffs, layer rebuild decisions
+    reconcile.py       cache diffs (by revision: version plus forks), layer rebuild decisions
+    editing.py         what a save sends and drops, and the words for every outcome
     media.py           attachment file cache keyed by attachment key and variant; extension
                        from the HTTP content type through an allow-list
   qgis_tier/           everything that needs QGIS
     transport.py       QLocalSocket driver for core/protocol.py (main thread, QTimer deadlines)
     connection.py      Connector: discovery scans, one client per build type, reconnect backoff
     cache.py           ProjectCache: one GeoPackage per project, a table per layer schema
-    sync.py            ProjectSync: subscribe, full refresh, live ids, schema rebuilds
+    sync.py            ProjectSync: subscribe, full refresh, live ids, schema rebuilds,
+                       holds while a layer is edited, writing edit replies
+    editing.py         EditHook: one per CoMapeo map layer; turns a save into edit requests
     controller.py      Controller: ties the above to QgsProject (adopt, re-attach, status)
     layers.py style.py map-layer properties and the default categorized style
     browser.py dock.py indicators.py   Browser entry, CoMapeo panel, stale badges
@@ -48,9 +52,12 @@ comapeo_qgis/          the plugin package (what gets zipped and installed)
     media_panel.py     the panel's photos and audio for the selected observation
     audio.py           AudioPlayer over QtMultimedia (Qt5 setMedia, Qt6 setSource/QAudioOutput)
 tests/                 plain pytest; fake_server.py implements PROTOCOL.md over a real socket,
-                       with test hooks: fail_next() injects an error reply, stuck_cursor repeats a cursor
+                       editing included, with test hooks: fail_next() injects an error reply,
+                       stuck_cursor repeats a cursor; allow_edits, role, edit_delay,
+                       concurrent_next, changes_before_edit and drop_after_edits for editing
   winpipe.py           Windows named pipes for the fake server and driver
   dev_server.py        starts `node src/dev/cli.ts` in ../comapeo-local-api for tests
+                       (`allow_edits`, `as_member`, `edit_delay`; `run()` sends stdin commands)
   test_real_server.py  runs the core against that dev server; skips when the checkout,
                        its node_modules or Node 22.18+ is missing
   media_server.py      a real HTTP server on 127.0.0.1 for media cases the dev server
@@ -58,7 +65,8 @@ tests/                 plain pytest; fake_server.py implements PROTOCOL.md over 
 tests/qgis/            tests that need QGIS; tests/conftest.py leaves them out elsewhere.
                        conftest.py has a real-widget iface and `wait_until` (runs the event loop)
 scripts/qgis-python.sh headless runner for the bundled Python of a local QGIS app
-scripts/smoke_e2e.py   drives the real-window smoke check; smoke_in_qgis.py runs inside QGIS (--code)
+scripts/smoke_e2e.py   drives the real-window smoke check; smoke_in_qgis.py runs inside QGIS (--code),
+                       smoke_media_in_qgis.py and smoke_edit_in_qgis.py for --media and --edit
                        its throwaway profile turns off QGIS's keychain password helper
 scripts/desktop-smoke.mjs  the same against a packaged CoMapeo Desktop (Playwright)
 ```
@@ -97,5 +105,13 @@ scripts/desktop-smoke.mjs  the same against a packaged CoMapeo Desktop (Playwrig
 - Media downloads: a reply can fail after a 200 header (app closed mid-file, transfer timeout). `MediaFetcher` keeps a file only for a 200 with no network error and either the full Content-Length or chunked framing. Core's blob server (7.7.0 and earlier, so today's desktop) sends no Content-Length for a plain GET, only `Transfer-Encoding: chunked`, and Qt reports a chunked body cut short as an error. A 200 with neither is never kept: only the closed connection ends it, so a cut-off one looks complete. Anything not kept is deleted and recorded as an error, which Refresh, an app connecting and a fresh attachment list for the selection all clear.
 - Audio on Qt5: Qt5 has its own `QAudioOutput`, a raw PCM sink unrelated to `QMediaPlayer`, so `audio.py` picks the Qt6 path by `hasattr(player, "setAudioOutput")`. PyQt5 passes player states as plain ints: compare them with the enum (`QMediaPlayer.PlaybackState` on Qt6, `QMediaPlayer.State` on Qt5), never by `.name`.
 - Audio: under `QT_QPA_PLATFORM=offscreen` (the pytest runs) QMediaPlayer stays in `LoadingMedia` on macOS and never plays, so pytest only checks the control and the cached file. Playback is checked in the real-window media smoke run, which samples state and position. Tests open files through `QDesktopServices.setUrlHandler("file", ...)` (the `opened` fixture), so no viewer is ever launched.
+- Editing: QGIS's own commit never writes to the cache. `EditHook` handles `beforeCommitChanges`, the only signal before QGIS writes: it reads the buffer (a deleted row is hidden from the layer, so ids, versions and forks come from the provider), empties the buffer by undoing the whole undo stack, sends the requests and blocks on the plugin's own socket (`LocalApiClient.wait`: waitForReadyRead, no event loop) for `SAVE_WAIT_S`. To stop a save and keep the edits it adds a feature of the wrong geometry type, which fails QGIS's pre-write check, and restores the edits on the next event-loop turn. Raising in the slot does not stop a commit, `rollBack()` in it crashes QGIS, and `setAllowCommit` is not in the Python API. The hook mutes its own signal handlers while it undoes or restores, so that neither releases the layer's hold nor records a new base version. Everything before the buffer is emptied runs under one `try`, ending in a refused save, and the checks run again after the large-save question, which spins the event loop. A geometry change is undone on the next event-loop turn (`QUndoStack.undo`, when the stack has grown by exactly the command that made it); the save still drops any geometry change that is left, as a backstop.
+- A wait on `QLocalSocket` that times out emits `errorOccurred(SocketTimeoutError)`; the transport ignores it, otherwise the connection would close mid-save.
+- The version and forks sent with an edit are those the row had when first changed in the session, recorded from the provider. While a map layer has unsaved edits, or a save has replies outstanding, the sync holds that layer (`ProjectSync.hold`): no fetch and no table switch, so rows cannot change under the user; `layers.list` and `categories.list` still go through, and queued work runs on release. Replies are written with `apply_edit_results`, which is allowed while held and falls back to a fetch when the cached row is no longer at the revision the edit was based on.
+- What may be edited comes from the connected app's latest `layers.list` (`Controller.live_definition`), never from the cached definition: the editing flags are not part of `schemaVersion`. `Controller.edit_state` decides whether a layer is editable (connected, flags allow it, the table has the private `forks` and `editable` columns and has finished its first download, no transaction groups); `configure` sets read-only, locked columns, value maps and the Category chooser from it. `setReadOnly` cannot change during an edit session, so a session the app stops allowing is warned about and refused at save. Date and multiple-choice columns stay locked in the plugin even when the server allows them.
+- Greying other devices' rows: the attribute table does not load hidden columns, so a row style on the hidden `editable` column sees NULL. The style reads the flag with `get_feature_by_id(@layer, $id)`. Open tables also keep the row styles they have computed across a reload and listen to no signal that clears them, so after each data change `refresh_not_editable` calls `fieldConditionalStyleChanged` on every open `QgsAttributeTableModel` of the layer. Tables QGIS opens itself reach Python as plain Qt classes (`isinstance` and `findChildren(QgsDualView)` find nothing), so the models are found by `metaObject().className()` and `sip.cast`; a view made in Python, as in the tests, does not show this, and the editing smoke check does.
+- Undo everything in a session releases the hold and the recorded versions; a live update can then land, and Redo reapplies the user's edit on the newer version without a conflict. The table shows the newer values meanwhile, so this is accepted. The revision guard in `apply_edit_results`, the hold while replies are outstanding and the deferred table switch for a held layer back each other up; no test needs each one on its own.
+- The schema key carries a cache format (`reconcile.CACHE_FORMAT`), so a cache written before the private `forks` and `editable` columns existed is rebuilt once on connect; `TableInfo` reads such a cache without them, so it still shows offline.
+- The plugin's messages for the user go through `Controller.notify`, which logs them, pushes them to the message bar (details behind "Show more") and emits `messageShown`. Tests and the smoke scripts listen to `messageShown`: `QgsMessageLog.messageReceived` does not reach Python in the headless test app or, as seen with QGIS 4.2.3, in a real window, so log-based checks in the smoke scripts see nothing.
 - `http.server` looks up the host name on bind, which can take 30 s on macOS; `tests/media_server.py` skips that.
 - Several app builds can run at once. The cache records the build that last served a project (`buildType` in the `project` metadata), and a project is reported "No longer available" only once that build has listed its projects without it; while that build is not connected the project reads "Not connected".

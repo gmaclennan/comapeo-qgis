@@ -146,7 +146,7 @@ def test_version_mismatch_says_which_side_to_update(
 def test_unknown_method_and_project_errors(server):
     client = connect(server)
     with pytest.raises(RemoteError) as info:
-        client.call("features.update", {})
+        client.call("features.create", {})
     assert info.value.code == "METHOD_NOT_FOUND"
     with pytest.raises(RemoteError) as info:
         client.call("layers.list", {"projectId": "nope"})
@@ -430,3 +430,64 @@ def test_track_times_from_the_server_become_m_values(server):
     [record] = page.features
     assert record.geometry.has_m
     assert record.geometry.wkt().startswith("LineStringM (")
+
+
+def _edit_params(**extra):
+    return {
+        "projectId": "proj-1",
+        "layerId": "observations",
+        "id": "obs-1",
+        "version": "v1",
+        "forks": [],
+        **extra,
+    }
+
+
+def test_the_fake_refuses_a_bad_category_before_a_field_it_would_not_have(server):
+    server.projects["proj-1"].categories.append(
+        {"categoryId": "cat-path", "name": "Path", "geometryTypes": ["LineString"]}
+    )
+    client = connect(server)
+    for category, reason in (
+        ("does-not-exist", "unknown-category"),
+        ("cat-path", "category-not-for-layer"),
+    ):
+        params = _edit_params(
+            categoryId=category, properties={"building_type": "school"}
+        )
+        with pytest.raises(RemoteError) as info:
+            client.call("features.update", params)
+        assert info.value.code == "INVALID_VALUE"
+        assert info.value.data == {"target": "category", "reason": reason}
+
+
+def test_the_fake_can_keep_an_observation_a_delete_overlapped(server):
+    client = connect(server)
+    server.concurrent_next = "kept"
+    assert client.call("features.delete", _edit_params()) == {
+        "id": "obs-1",
+        "concurrent": True,
+    }
+    shown = client.call(
+        "layers.getFeatures",
+        {"projectId": "proj-1", "layerId": "observations", "ids": ["obs-1"]},
+    )
+    [feature] = shown["features"]
+    assert feature["version"] != "v1" and len(feature["forks"]) == 1
+
+
+def test_the_fake_can_hold_the_layer_list(server):
+    client = connect(server)
+    server.layers_gate = threading.Event()
+    answered = []
+    thread = threading.Thread(
+        target=lambda: answered.append(
+            client.call("layers.list", {"projectId": "proj-1"})
+        )
+    )
+    thread.start()
+    time.sleep(0.3)
+    assert answered == []
+    server.layers_gate.set()
+    thread.join(5)
+    assert answered and answered[0]["layers"]

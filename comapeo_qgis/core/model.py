@@ -66,7 +66,9 @@ class Option:
 
 @dataclass(frozen=True)
 class ColumnSpec:
-    """One attribute column. `type` is as sent; `kind` is what to store it as."""
+    """One attribute column. `type` is as sent; `kind` is what to store it as.
+
+    `category_ids` is None when the column can be edited whatever the category."""
 
     name: str
     type: str
@@ -74,6 +76,8 @@ class ColumnSpec:
     label: str
     role: str | None
     options: tuple[Option, ...] = ()
+    editable: bool = False
+    category_ids: tuple[str, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -84,6 +88,10 @@ class LayerDefinition:
     geometry_type: str
     schema_version: str | None
     columns: tuple[ColumnSpec, ...]
+    # None: the server predates editing and sent no `editable` member at all.
+    editable: bool | None = None
+    read_only_reason: str | None = None
+    edit_operations: tuple[str, ...] = ()
 
     @property
     def geometry_supported(self) -> bool:
@@ -140,6 +148,20 @@ class FeatureRecord:
     attributes: Mapping[str, Any]
     category_id: str | None
     attachments: tuple[Attachment, ...] = ()
+    forks: tuple[str, ...] = ()
+    editable: bool = False
+
+    @property
+    def revision(self) -> str:
+        return revision(self.version, self.forks)
+
+
+def revision(version: str, forks: Sequence[str] = ()) -> str:
+    """A document's state as far as an edit is concerned: a late fork changes
+    `forks` and leaves `version` alone."""
+    if not forks:
+        return version
+    return json.dumps([version, *sorted(forks)])
 
 
 @dataclass(frozen=True)
@@ -174,6 +196,11 @@ class Category:
     name: str
     color: str | None = None
     icon: Icon | None = None
+    # None: the server did not say, so the category may be offered anywhere.
+    geometry_types: tuple[str, ...] | None = None
+
+    def offered_for(self, geometry_type: str) -> bool:
+        return self.geometry_types is None or geometry_type in self.geometry_types
 
 
 def column_kind(column_type: Any) -> str:
@@ -206,6 +233,7 @@ def parse_layers(result: Any) -> list[LayerDefinition]:
             continue
         seen.add(layer_id)
         schema_version = _get(item, "schemaVersion")
+        editable = _get(item, "editable") if "editable" in item else None
         layers.append(
             LayerDefinition(
                 layer_id=layer_id,
@@ -214,6 +242,9 @@ def parse_layers(result: Any) -> list[LayerDefinition]:
                 geometry_type=_str(_get(item, "geometryType")) or "",
                 schema_version=None if schema_version is None else str(schema_version),
                 columns=_parse_columns(_get(item, "columns")),
+                editable=None if editable is None else editable is True,
+                read_only_reason=_str(_get(item, "readOnlyReason")),
+                edit_operations=_strings(_get(item, "editOperations")),
             )
         )
     return layers
@@ -233,6 +264,7 @@ def _parse_columns(value: Any) -> tuple[ColumnSpec, ...]:
             for o in _list(_get(item, "options"))
             if isinstance(o, dict) and "value" in o
         )
+        category_ids = _get(item, "categoryIds")
         columns.append(
             ColumnSpec(
                 name=name,
@@ -241,6 +273,10 @@ def _parse_columns(value: Any) -> tuple[ColumnSpec, ...]:
                 label=_str(_get(item, "label")) or name,
                 role=_str(_get(item, "role")),
                 options=options,
+                editable=_get(item, "editable") is True,
+                category_ids=None
+                if not isinstance(category_ids, list)
+                else _strings(category_ids),
             )
         )
     return tuple(columns)
@@ -328,6 +364,8 @@ def parse_feature(item: Any, layer: LayerDefinition) -> FeatureRecord | None:
             for a in (_parse_attachment(x) for x in _list(_get(item, "attachments")))
             if a is not None
         ),
+        forks=tuple(sorted(set(_strings(_get(item, "forks"))))),
+        editable=_get(item, "editable") is True,
     )
 
 
@@ -425,12 +463,16 @@ def parse_categories(result: Any) -> list[Category]:
         category_id = _get(item, "categoryId")
         if not _nonempty_str(category_id):
             continue
+        geometry_types = _get(item, "geometryTypes")
+        if isinstance(geometry_types, list):
+            geometry_types = _strings(geometry_types)
         categories.append(
             Category(
                 category_id,
                 _str(_get(item, "name")) or "",
                 _str(_get(item, "color")),
                 _parse_icon(_get(item, "icon")),
+                geometry_types if isinstance(geometry_types, tuple) else None,
             )
         )
     return categories
@@ -561,6 +603,10 @@ def _get(obj: Any, key: str) -> Any:
 
 def _list(value: Any) -> Sequence[Any]:
     return value if isinstance(value, list) else []
+
+
+def _strings(value: Any) -> tuple[str, ...]:
+    return tuple(v for v in _list(value) if _nonempty_str(v))
 
 
 def _str(value: Any) -> str | None:

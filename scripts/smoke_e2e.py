@@ -14,6 +14,11 @@ With --media it instead runs scripts/smoke_media_in_qgis.py: the CoMapeo panel
 with an observation's photos, a photo not yet synced, audio playback and
 "Download all media", with screenshots prefixed `media-`.
 
+With --edit it runs scripts/smoke_edit_in_qgis.py against a dev server with
+editing allowed, serving as a member: a field, a category, an attempted move,
+a delete and a stale save, through QGIS's own editing actions, with
+screenshots prefixed `edit-`.
+
 Exits non-zero if any check fails. QGIS is killed if it hangs.
 """
 
@@ -44,6 +49,7 @@ from tests.driver import BlockingClient  # noqa: E402
 
 IN_QGIS = ROOT / "scripts" / "smoke_in_qgis.py"
 MEDIA_IN_QGIS = ROOT / "scripts" / "smoke_media_in_qgis.py"
+EDIT_IN_QGIS = ROOT / "scripts" / "smoke_edit_in_qgis.py"
 PLUGIN = "comapeo_qgis"
 PROJECT_PREFIX = "Tapajós"
 
@@ -121,8 +127,11 @@ class Run:
         self.args = args
         self.out = Path(args.out).resolve()
         self.out.mkdir(parents=True, exist_ok=True)
-        self.prefix = ("media-" if args.media else "") + f"qgis-{args.qgis_version}"
-        self.script = MEDIA_IN_QGIS if args.media else IN_QGIS
+        kind = "media-" if args.media else "edit-" if args.edit else ""
+        self.prefix = kind + f"qgis-{args.qgis_version}"
+        self.script = (
+            MEDIA_IN_QGIS if args.media else EDIT_IN_QGIS if args.edit else IN_QGIS
+        )
         self.media_targets: dict[str, Any] = {}
         # Short: the dev server's socket lives under the discovery folder.
         self.work = Path(tempfile.mkdtemp(prefix="cqs-", dir="/tmp"))
@@ -470,6 +479,147 @@ class Run:
             report.get("downloadAll"),
         )
 
+    def edit(self) -> None:
+        print("Starting the dev server with editing allowed…")
+        self.server = dev_server.start(
+            discovery_dir=str(self.discovery),
+            observations=self.args.observations,
+            tracks=self.args.tracks,
+            photos=self.args.photos,
+            projects=1,
+            allow_edits=True,
+            as_member=True,
+        )
+        oracle = Oracle(str(self.discovery))
+        project_id = oracle.projects()[0]["projectId"]
+        before = features(oracle, project_id)
+        categories = oracle.client.call("categories.list", {"projectId": project_id})
+        plant = next(
+            c["categoryId"] for c in categories["categories"] if c["name"] == "Plant"
+        )
+        mine = [
+            i
+            for i in self.server.run("list own 20")["ids"]
+            if not str(before[i]["properties"]["notes"]).startswith("An example")
+        ]
+        spring = next(
+            i
+            for i, f in before.items()
+            if f["editable"] and f["properties"]["notes"] == "An example Spring"
+        )
+        targets = {
+            "field": mine[0],
+            "move": mine[1],
+            "delete": mine[2],
+            "stale": mine[3],
+            "category": spring,
+            "plant": plant,
+        }
+        self.media_targets = targets
+        make_profile(self.profiles)
+        state: dict[str, Any] = {}
+
+        commands = {
+            "role": "role coordinator",
+            "stale": f"update {targets['stale']}",
+        }
+
+        def on_tick() -> None:
+            for name, command in commands.items():
+                ask = self.work / f"{name}.json"
+                if name in state or not ask.exists():
+                    continue
+                assert self.server is not None
+                state[name] = self.server.run(command)
+                done = self.work / f"{name}-done.tmp"
+                done.write_text(json.dumps(state[name]), encoding="utf-8")
+                done.replace(self.work / f"{name}-done.json")
+
+        print(f"Launching QGIS {self.args.qgis_version}…")
+        report = self.launch("edit", project_id, [], on_tick)
+        after = features(oracle, project_id)
+        oracle.close()
+        if report is None:
+            return
+        self.check("edit: plugin loaded by QGIS", report.get("pluginLoaded"))
+        self.check(
+            "edit: no failures in the QGIS script",
+            not report.get("failures"),
+            report.get("failures") or None,
+        )
+        self.check(
+            "edit: no Python exceptions",
+            not report.get("exceptions"),
+            report.get("exceptions") or None,
+        )
+        python_errors = [
+            m for m in report.get("messageLog", []) if m["tag"] == "Python error"
+        ]
+        self.check("edit: no Python errors in the log", not python_errors)
+        self.check(
+            "edit: Toggle Editing starts a session, with the attribute table open",
+            report.get("editingStarted") and report.get("attributeTableOpen"),
+        )
+        saves = report.get("saves", {})
+        field = after.get(targets["field"], {})
+        self.check(
+            "edit: a field saved through the layer reaches CoMapeo",
+            field.get("properties", {}).get("notes") == "Checked from QGIS"
+            and report.get("fieldAfter") == "Checked from QGIS"
+            and "1 change saved to CoMapeo." in saves.get("field", {}).get("bar", []),
+            saves.get("field"),
+        )
+        self.check(
+            "edit: a category change reaches CoMapeo",
+            after.get(targets["category"], {}).get("categoryId") == plant
+            and report.get("categoryAfter") == "Plant",
+            {"bar": saves.get("category"), "shown": report.get("categoryAfter")},
+        )
+        moved = after.get(targets["move"], {})
+        self.check(
+            "edit: an attempted move is undone at once and never saved",
+            moved.get("version") == before[targets["move"]]["version"]
+            and report.get("moveAfter") == report.get("moveBefore")
+            and report.get("moveLeftUnsaved") is False
+            and any(
+                "change of location was undone" in m for m in report.get("shown", [])
+            ),
+            {"after": report.get("moveAfter"), "shown": report.get("shown")},
+        )
+        shown_rows = report.get("tableRows") or []
+        others = {i for i in shown_rows if not before.get(i, {}).get("editable")}
+        self.check(
+            "edit: the attribute table greys exactly the other device's rows",
+            bool(others)
+            and len(others) < len(shown_rows)
+            and set(report.get("greyRows") or []) == others,
+            {"grey": len(report.get("greyRows") or []), "others": len(others)},
+        )
+        self.check(
+            "edit: made coordinator, the open table greys no rows",
+            "role" in state and report.get("greyAfterRole") == [],
+            {"grey": len(report.get("greyAfterRole") or [])},
+        )
+        self.check(
+            "edit: a delete reaches CoMapeo",
+            targets["delete"] not in after and not report.get("deletedStillShown"),
+            saves.get("delete"),
+        )
+        stale = after.get(targets["stale"], {})
+        self.check(
+            "edit: a save of an observation changed in CoMapeo is refused",
+            "stale" in state
+            and stale.get("version") == state["stale"]["versionId"]
+            and report.get("staleAfter") == stale.get("properties", {}).get("notes")
+            and any(
+                "changed in CoMapeo since QGIS" in m for m in report.get("shown", [])
+            ),
+            {"bar": saves.get("stale"), "shown": report.get("staleAfter")},
+        )
+        self.check(
+            "edit: Toggle Editing ends the session", report.get("editingStopped")
+        )
+
     def close(self) -> None:
         if self.server is not None:
             self.server.stop()
@@ -518,6 +668,20 @@ def pick_media(oracle: Oracle, project_id: str) -> dict[str, Any]:
     return targets
 
 
+def features(oracle: Oracle, project_id: str) -> dict[str, Any]:
+    found: dict[str, Any] = {}
+    cursor = None
+    while True:
+        params: dict[str, Any] = {"projectId": project_id, "layerId": "observations"}
+        if cursor is not None:
+            params["cursor"] = cursor
+        page = oracle.client.call("layers.getFeatures", params)
+        found.update({f["id"]: f for f in page["features"]})
+        cursor = page["nextCursor"]
+        if cursor is None:
+            return found
+
+
 def scrub_file(path: Path) -> None:
     text = path.read_text(encoding="utf-8", errors="replace")
     path.write_text(text.replace(str(Path.home()), "~"), encoding="utf-8")
@@ -535,6 +699,9 @@ def main() -> int:
     parser.add_argument(
         "--media", action="store_true", help="check the photo and audio panel"
     )
+    parser.add_argument(
+        "--edit", action="store_true", help="check editing with QGIS's own tools"
+    )
     args = parser.parse_args()
     reason = dev_server.skip_reason()
     if reason:
@@ -544,6 +711,8 @@ def main() -> int:
     try:
         if args.media:
             run.media()
+        elif args.edit:
+            run.edit()
         else:
             run.live()
             if hasattr(run, "project_id"):

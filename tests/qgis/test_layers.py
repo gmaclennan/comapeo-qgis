@@ -37,6 +37,7 @@ FIELD_TYPES = {
     "number": "Double",
     "integer": "LongLong",
     "datetime": "QDateTime",
+    "string_list": "QStringList",
     "json": "QVariantMap",
 }
 
@@ -93,6 +94,8 @@ def assert_value(column, qgis_value, served):
         assert qgis_value.toMSecsSinceEpoch() == iso_millis(served), column["name"]
     elif kind == "number":
         assert math.isclose(qgis_value, served), column["name"]
+    elif kind == "string_list":
+        assert list(qgis_value) == served, column["name"]
     else:
         assert plain(qgis_value) == served, (column["name"], qgis_value, served)
 
@@ -124,7 +127,11 @@ def assert_layer_matches(layer, oracle, layer_id):
     for column in definition["columns"]:
         field = layer.fields().field(column["name"])
         expected_type = FIELD_TYPES[column["type"]]
-        assert field.type() == meta_type(expected_type), column["name"]
+        if column["type"] == "string_list":
+            # GeoPackage stores lists as JSON; QGIS picks the type from the content.
+            assert field.type() in (meta_type("QStringList"), meta_type("QVariantMap"))
+        else:
+            assert field.type() == meta_type(expected_type), column["name"]
         assert (
             layer.attributeDisplayName(layer.fields().indexOf(column["name"]))
             == (column["label"])

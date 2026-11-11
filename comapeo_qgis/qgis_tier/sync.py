@@ -11,6 +11,7 @@ from qgis.PyQt.QtCore import QObject, QTimer, pyqtSignal
 from ..core.model import (
     LayerDefinition,
     parse_categories,
+    parse_feature,
     parse_feature_page,
     parse_layer_changed,
     parse_layers,
@@ -23,7 +24,7 @@ from ..core.protocol import (
     PROJECT_NOT_FOUND,
     RequestError,
 )
-from ..core.reconcile import Reconciler, layer_schema_key
+from ..core.reconcile import Reconciler, SyncPlan, layer_schema_key
 from .cache import CacheError, CacheLocked, ProjectCache, TableInfo
 from .transport import LocalApiClient
 
@@ -51,7 +52,9 @@ class _Fetch:
         self.ids = ids
         self.generation = generation
         self.replaces = replaces
-        self.reconciler = Reconciler(cached, ids)
+        # A change notification rewrites a row only when the document changed,
+        # so the echo of the plugin's own edit writes nothing.
+        self.reconciler = Reconciler(cached, ids, refresh_all=ids is None)
         self.cursor: Any = None
         self.cursors: set[str] = set()
         self.restarts = 0
@@ -65,6 +68,11 @@ class ProjectSync(QObject):
     refresh starts a new generation and abandons fetches of the old one. A
     rebuilt table is filled while map layers stay on the old one, and the
     switch (`layerRebuilt`) happens only once the new table is complete.
+
+    A held layer (unsaved edits, or a save waiting for replies) is neither
+    fetched nor rebuilt, so its rows stay as the user saw them; layer
+    definitions and categories are still read. Work queued meanwhile runs on
+    release.
     """
 
     # `layerRebuilt(layer_id, old_category_field, old_table)`: a table was
@@ -108,6 +116,8 @@ class ProjectSync(QObject):
         self._lock_retry = QTimer(self)
         self._lock_retry.setSingleShot(True)
         self._lock_retry.timeout.connect(self._retry_after_lock)
+        self._holds: dict[str, set[str]] = {}
+        self._deferred_rebuilds: dict[str, tuple[str, str]] = {}
 
     @property
     def connected(self) -> bool:
@@ -116,6 +126,88 @@ class ProjectSync(QObject):
     @property
     def busy(self) -> bool:
         return self.refreshing or bool(self._fetches)
+
+    def hold(self, layer_id: str, key: str) -> None:
+        """Stop fetching into this layer until every key has been released."""
+        keys = self._holds.setdefault(layer_id, set())
+        if key in keys:
+            return
+        keys.add(key)
+        fetch = self._fetches.pop(layer_id, None)
+        if fetch is not None:
+            self._requeue(fetch)
+        self.statusChanged.emit()
+
+    def release(self, layer_id: str, key: str) -> None:
+        keys = self._holds.get(layer_id)
+        if not keys or key not in keys:
+            return
+        keys.discard(key)
+        if keys:
+            return
+        del self._holds[layer_id]
+        rebuild = self._deferred_rebuilds.pop(layer_id, None)
+        if rebuild is not None:
+            self.layerRebuilt.emit(layer_id, *rebuild)
+        self.statusChanged.emit()
+        self._next(layer_id)
+
+    def held(self, layer_id: str) -> bool:
+        return layer_id in self._holds
+
+    def refetch(self, layer_id: str, ids: list[str]) -> None:
+        """Fetch these features again, once the layer is not held."""
+        if not ids:
+            return
+        self._pending_ids.setdefault(layer_id, set()).update(ids)
+        self._next(layer_id)
+
+    def apply_edit_results(
+        self,
+        layer_id: str,
+        features: list[tuple[Any, str]],
+        removed: list[str],
+    ) -> None:
+        """Write features the server returned for edits, also while held.
+
+        `features` pairs each raw feature with the revision its edit was based
+        on; a row the cache no longer holds at that revision is fetched again
+        instead, as is anything that cannot be read."""
+        info = self.cache.table(layer_id)
+        if info is None:
+            return
+        ids = [f.get("id") for f, _ in features if isinstance(f, dict)]
+        wanted = [i for i in ids if isinstance(i, str)] + list(removed)
+        try:
+            current = self.cache.revisions(info, wanted)
+        except CacheError as err:
+            self.refetch(layer_id, wanted)
+            if isinstance(err, CacheLocked):
+                self._hit_lock(err, layer_id)
+            return
+        upserts = {}
+        refetch = []
+        for raw, based_on in features:
+            record = parse_feature(raw, info.definition)
+            if record is None:
+                if isinstance(raw, dict) and isinstance(raw.get("id"), str):
+                    refetch.append(raw["id"])
+                continue
+            if current.get(record.id) != based_on:
+                refetch.append(record.id)
+                continue
+            upserts[record.id] = record
+        deletes = tuple(i for i in removed if i in current and i not in upserts)
+        try:
+            touched = self.cache.apply(info, SyncPlan(tuple(upserts.values()), deletes))
+        except CacheError as err:
+            self.refetch(layer_id, wanted)
+            if isinstance(err, CacheLocked):
+                self._hit_lock(err, layer_id)
+            return
+        if touched:
+            self.layerDataChanged.emit(layer_id)
+        self.refetch(layer_id, refetch)
 
     def attach(self, client: LocalApiClient) -> None:
         self._client = client
@@ -258,7 +350,10 @@ class ProjectSync(QObject):
                 elif created:
                     old_field = old.field("category_id") if old else ""
                     old_table = old.table if old else ""
-                    self.layerRebuilt.emit(layer.layer_id, old_field, old_table)
+                    if layer.layer_id in self._holds:
+                        self._deferred_rebuilds[layer.layer_id] = (old_field, old_table)
+                    else:
+                        self.layerRebuilt.emit(layer.layer_id, old_field, old_table)
                 layer_ids.append(layer.layer_id)
             for layer_id in list(self._pending_ids):
                 if layer_id not in layer_ids:
@@ -282,6 +377,8 @@ class ProjectSync(QObject):
     def _next(self, layer_id: str) -> None:
         if not self.connected or self.refreshing or layer_id in self._fetches:
             return
+        if layer_id in self._holds:
+            return
         info = self.cache.table(layer_id)
         replaces = None
         if layer_id in self._pending_full and layer_id in self._staged:
@@ -299,7 +396,7 @@ class ProjectSync(QObject):
         else:
             return
         try:
-            cached = self.cache.versions(info)
+            cached = self.cache.revisions(info)
         except CacheError as err:
             if ids is None:
                 self._pending_full.add(layer_id)
@@ -344,7 +441,7 @@ class ProjectSync(QObject):
             del self._fetches[layer_id]
             if error.code == INVALID_CURSOR and fetch.restarts < MAX_CURSOR_RESTARTS:
                 try:
-                    cached = self.cache.versions(fetch.info)
+                    cached = self.cache.revisions(fetch.info)
                 except CacheError as err:
                     if isinstance(err, CacheLocked):
                         self._requeue(fetch)
