@@ -6,6 +6,7 @@ from qgis.gui import QgsDockWidget
 from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtWidgets import (
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QMessageBox,
     QPushButton,
@@ -16,7 +17,11 @@ from qgis.PyQt.QtWidgets import (
 )
 
 from .connection import ServerState
-from .controller import Controller
+from .controller import (
+    Controller,
+    extra_discovery_locations,
+    set_extra_discovery_locations,
+)
 
 _ROLE_PROJECT = Qt.ItemDataRole.UserRole
 
@@ -38,6 +43,17 @@ class CoMapeoDock(QgsDockWidget):
             Qt.TextInteractionFlag.TextSelectableByMouse
         )
         layout.addWidget(self.status_label)
+        self.locations_button = QPushButton("Other app locations…", body)
+        self.locations_button.setObjectName("locationsButton")
+        self.locations_button.setToolTip(
+            "Folders or discovery files of CoMapeo Desktop builds that are not "
+            "installed in the usual place, such as a development build"
+        )
+        self.locations_button.clicked.connect(self._edit_locations)
+        locations_row = QHBoxLayout()
+        locations_row.addStretch(1)
+        locations_row.addWidget(self.locations_button)
+        layout.addLayout(locations_row)
         self.projects = QTreeWidget(body)
         self.projects.setObjectName("projectList")
         self.projects.setHeaderLabels(["Project", "Status"])
@@ -89,7 +105,7 @@ class CoMapeoDock(QgsDockWidget):
             return NOT_RUNNING_MESSAGE
         lines = []
         for status in statuses:
-            if status.state is ServerState.CONNECTED:
+            if status.state in (ServerState.CONNECTED, ServerState.NOT_RUNNING):
                 lines.append(status.message)
             else:
                 lines.append(f"{status.app_name}: {status.message}")
@@ -120,6 +136,18 @@ class CoMapeoDock(QgsDockWidget):
         self.remove_button.setEnabled(
             project_id is not None and self.controller.cache(project_id).exists
         )
+
+    def _edit_locations(self) -> None:
+        text, ok = QInputDialog.getMultiLineText(
+            self,
+            "Other app locations",
+            "Look for CoMapeo Desktop in these folders or discovery files too, one "
+            "per line. For a development build, give its data folder.",
+            "\n".join(extra_discovery_locations()),
+        )
+        if ok:
+            set_extra_discovery_locations(text.splitlines())
+            self.controller.refresh()
 
     def _add_selected(self) -> None:
         project_id = self.selected_project()

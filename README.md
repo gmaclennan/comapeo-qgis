@@ -25,7 +25,9 @@ scripts/qgis-python.sh -m pytest
 QGIS_VERSION=4.0.2 scripts/qgis-python.sh -m pytest
 ```
 
-To point the plugin at a development server instead of an installed CoMapeo Desktop, set the QGIS setting `comapeo/discoveryPath`, or the environment variable `COMAPEO_LOCAL_API_DISCOVERY`, to the server's discovery file or the folder holding it. To try it in QGIS by hand:
+The plugin looks for the discovery file of each installed build ("CoMapeo Desktop", "CoMapeo Desktop RC", "CoMapeo Desktop Internal") in its data folder: `~/Library/Application Support/<build>/comapeo/` on macOS, `%APPDATA%\<build>\comapeo\` on Windows, and `$XDG_CONFIG_HOME/<build>/comapeo/` (or `~/.config/…`) on Linux. A build kept elsewhere, such as a development build of CoMapeo Desktop (whose data folder is `data/default` in its checkout, or `USER_DATA_PATH`), is found once its data folder, its `comapeo` folder or its discovery file is listed under "Other app locations…" in the CoMapeo panel, or in the environment variable `COMAPEO_LOCAL_API_DISCOVERY_EXTRA` (separated by `:`, or `;` on Windows). These are searched as well as the installed builds.
+
+To look only in one place, for example at a development server and nothing else, set the QGIS setting `comapeo/discoveryPath`, or the environment variable `COMAPEO_LOCAL_API_DISCOVERY`, to the server's discovery file or the folder holding it; the tests do this so they never find a real app. To try it in QGIS by hand:
 
 ```sh
 cd ../comapeo-local-api && fnm exec --using=24 npm run dev -- --discovery-dir /tmp/comapeo-dev

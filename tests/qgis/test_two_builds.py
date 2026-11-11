@@ -8,11 +8,14 @@ import sys
 
 import pytest
 from qgis.core import QgsSettings
+from qgis.PyQt.QtWidgets import QInputDialog
 
 from comapeo_qgis.plugin import CoMapeoPlugin
+from comapeo_qgis.qgis_tier.controller import extra_discovery_locations
 from tests.fake_server import FakeProject, FakeServer, observation, short_tempdir
-from tests.qgis.conftest import DISCOVERY_SETTING, wait_until
+from tests.qgis.conftest import DISCOVERY_SETTING, pump, wait_until
 from tests.qgis.helpers import rows
+from tests.qgis.test_discovery_states import browser_messages
 
 
 @pytest.fixture
@@ -22,6 +25,7 @@ def home(monkeypatch):
     monkeypatch.setenv("APPDATA", os.path.join(path, "AppData", "Roaming"))
     monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
     monkeypatch.delenv("COMAPEO_LOCAL_API_DISCOVERY", raising=False)
+    monkeypatch.delenv("COMAPEO_LOCAL_API_DISCOVERY_EXTRA", raising=False)
     QgsSettings().remove(DISCOVERY_SETTING)
     yield path
     shutil.rmtree(path, ignore_errors=True)
@@ -39,7 +43,7 @@ def app_folder(home: str, name: str) -> str:
 @pytest.fixture
 def servers(home):
     started = []
-    for folder in ("CoMapeo Desktop", "CoMapeo Desktop Dev"):
+    for folder in ("CoMapeo Desktop", "CoMapeo Desktop Internal"):
         os.makedirs(app_folder(home, folder))
         server = FakeServer().start()
         server.write_discovery(app_folder(home, folder))
@@ -57,10 +61,10 @@ def plugin(iface):
 
 
 def test_project_of_a_closed_build_is_not_reported_gone(plugin, servers, home):
-    production, development = servers
+    production, internal = servers
     p1 = production.add_project(FakeProject("p1", "Production project"))
     p1.features["observations"] = [observation("a")]
-    development.add_project(FakeProject("p2", "Dev project"))
+    internal.add_project(FakeProject("p2", "Internal project"))
     plugin.initGui()
     controller = plugin.controller
     wait_until(lambda: controller.available_layers("p1"))
@@ -71,13 +75,11 @@ def test_project_of_a_closed_build_is_not_reported_gone(plugin, servers, home):
 
     production.stop()
     wait_until(lambda: not controller.project_status("p1").connected)
-    development.add_project(FakeProject("p3", "Joined later"))
+    internal.add_project(FakeProject("p3", "Joined later"))
     plugin.dock.refresh_button.click()
     wait_until(
-        lambda: (
-            "p3" in {p.project_id for p in controller.served_projects("development")}
-        ),
-        message="the dev app answered after Refresh",
+        lambda: "p3" in {p.project_id for p in controller.served_projects("internal")},
+        message="the internal build answered after Refresh",
     )
     status = controller.project_status("p1")
     assert not status.gone
@@ -94,9 +96,9 @@ def test_project_of_a_closed_build_is_not_reported_gone(plugin, servers, home):
 
 
 def test_project_left_in_its_own_build_is_reported_gone(plugin, servers):
-    production, development = servers
+    production, internal = servers
     production.add_project(FakeProject("p1", "Production project"))
-    development.add_project(FakeProject("p2", "Dev project"))
+    internal.add_project(FakeProject("p2", "Internal project"))
     plugin.initGui()
     controller = plugin.controller
     wait_until(lambda: controller.available_layers("p1"))
@@ -107,3 +109,60 @@ def test_project_left_in_its_own_build_is_reported_gone(plugin, servers):
     plugin.dock.refresh_button.click()
     wait_until(lambda: controller.project_status("p1").gone)
     assert "No longer available" in controller.project_status("p1").describe()
+
+
+@pytest.fixture
+def dev_build(home):
+    """A development build: its data folder is in the desktop checkout."""
+    data = os.path.join(home, "checkout", "data", "default")
+    os.makedirs(os.path.join(data, "comapeo"))
+    server = FakeServer(app_name="CoMapeo Desktop Dev").start()
+    server.add_project(FakeProject("p9", "Dev project"))
+    server.write_discovery(os.path.join(data, "comapeo"))
+    yield server, data
+    server.stop()
+
+
+def test_a_build_outside_the_app_folders_is_found_once_added_in_the_panel(
+    plugin, dev_build, servers, monkeypatch
+):
+    dev, data = dev_build
+    servers[0].add_project(FakeProject("p1", "Production project"))
+    plugin.initGui()
+    controller = plugin.controller
+    wait_until(lambda: controller.available_layers("p1"))
+    pump(300)
+    assert not controller.available_layers("p9")
+
+    asked = []
+
+    def answer(_parent, _title, _label, text):
+        asked.append(text)
+        return f"{data}\n", True
+
+    monkeypatch.setattr(QInputDialog, "getMultiLineText", answer)
+    plugin.dock.locations_button.click()
+    wait_until(lambda: controller.available_layers("p9"), message="dev build found")
+    assert asked == [""]
+    assert extra_discovery_locations() == [data]
+    assert controller.available_layers("p1")
+    text = plugin.dock.status_label.text()
+    assert "Connected to CoMapeo Desktop Dev" in text, text
+
+    dev.stop()
+    expected = (
+        "CoMapeo Desktop Dev is not running, or QGIS access is switched off in "
+        "its settings."
+    )
+    wait_until(lambda: expected in plugin.dock.status_label.text())
+    assert "CoMapeo Desktop Dev: " not in plugin.dock.status_label.text()
+
+
+def test_extra_locations_from_the_environment_are_searched(
+    plugin, dev_build, monkeypatch
+):
+    _dev, data = dev_build
+    monkeypatch.setenv("COMAPEO_LOCAL_API_DISCOVERY_EXTRA", data)
+    plugin.initGui()
+    wait_until(lambda: plugin.controller.available_layers("p9"))
+    assert browser_messages() == ["CoMapeo Desktop Dev"]

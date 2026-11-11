@@ -29,6 +29,7 @@ from tests import dev_server as dev
 APP = start_app()
 
 DISCOVERY_SETTING = "comapeo/discoveryPath"
+EXTRA_DISCOVERY_SETTING = "comapeo/extraDiscoveryPaths"
 
 
 def _under_temp(path: str) -> bool:
@@ -211,6 +212,7 @@ def clean_state() -> Iterator[None]:
     shutil.rmtree(cache_root(), ignore_errors=True)
     shutil.rmtree(empty, ignore_errors=True)
     QgsSettings().remove(DISCOVERY_SETTING)
+    QgsSettings().remove(EXTRA_DISCOVERY_SETTING)
 
 
 def use_discovery(path: str) -> None:

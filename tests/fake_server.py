@@ -217,7 +217,9 @@ class FakeServer:
         chunk_size: int | None = None,
         socket_path: str | None = None,
         secret: str | None = None,
+        app_name: str = "CoMapeo Desktop",
     ) -> None:
+        self.app_name = app_name
         self._own_dir = socket_path is None or is_pipe(socket_path)
         self.dir = short_tempdir() if self._own_dir else os.path.dirname(socket_path)
         self.socket_path = socket_path or new_endpoint(self.dir)
@@ -259,7 +261,7 @@ class FakeServer:
                     "secret": self.secret,
                     "protocolVersions": list(self.protocol_versions),
                     "pid": os.getpid(),
-                    "app": {"name": "CoMapeo Desktop", "version": "9.9.9"},
+                    "app": {"name": self.app_name, "version": "9.9.9"},
                 },
                 f,
             )
@@ -388,7 +390,7 @@ class FakeServer:
                 "result": {
                     "protocolVersion": max(shared),
                     "server": {"name": "@comapeo/local-api", "version": "0.0.0"},
-                    "app": {"name": "CoMapeo Desktop", "version": "9.9.9"},
+                    "app": {"name": self.app_name, "version": "9.9.9"},
                 },
             }
         )

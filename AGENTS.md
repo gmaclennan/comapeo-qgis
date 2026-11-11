@@ -29,7 +29,7 @@ comapeo_qgis/          the plugin package (what gets zipped and installed)
   core/                no qgis or PyQt imports; sans-I/O where possible
     framing.py         length-prefixed JSON frames
     protocol.py        client state machine (bytes in, bytes and events out)
-    discovery.py       finding discovery files per build type and OS
+    discovery.py       finding discovery files per build type and OS, plus extra locations
     model.py           API results to neutral records (fields, features, categories)
     reconcile.py       cache diffs, layer rebuild decisions
     media.py           attachment file cache keyed by attachment key
@@ -76,4 +76,5 @@ scripts/smoke_e2e.py   drives the real-window smoke check; smoke_in_qgis.py runs
 - Windows will not delete a file that is open. Map layers removed from the project close their GeoPackage only when deferred deletes run, so `remove_cached_data` flushes them and retries once.
 - Windows: there is no `AF_UNIX` in Python, so tests that need `tests/fake_server.py` or `tests/driver.py`'s socket stream skip there; the oracle in `tests/qgis/helpers.py` uses `QLocalSocket`, which speaks named pipes. A dialog in a headless run blocks forever, so `tests/qgis/conftest.py` makes any unexpected `QMessageBox` fail the test.
 - The protocol has no notification for projects joined or left, so the controller re-lists projects every 10 s (`PROJECT_POLL_MS`); a poll only acts on projects that appeared, disappeared or were renamed, never refetching the ones on the map.
+- Discovery: the installed builds' data folders are listed in `core/discovery.APP_FOLDERS`. A development build of desktop is not among them (its data is in its checkout), so it is found only through an extra location: the panel's "Other app locations…" (setting `comapeo/extraDiscoveryPaths`) or `COMAPEO_LOCAL_API_DISCOVERY_EXTRA`. Each extra location is a build keyed `extra:<location>`. The override (`comapeo/discoveryPath` or `COMAPEO_LOCAL_API_DISCOVERY`) replaces every location, extras included; tests rely on that never to read a real app's folder, so keep it that way.
 - Several app builds can run at once. The cache records the build that last served a project (`buildType` in the `project` metadata), and a project is reported "No longer available" only once that build has listed its projects without it; while that build is not connected the project reads "Not connected".

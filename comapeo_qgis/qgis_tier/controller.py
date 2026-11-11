@@ -56,6 +56,7 @@ from .sync import ProjectSync
 from .transport import LocalApiClient
 
 SETTING_DISCOVERY = "comapeo/discoveryPath"
+SETTING_EXTRA_DISCOVERY = "comapeo/extraDiscoveryPaths"
 PROJECT_POLL_MS = POLL_INTERVAL_MS
 
 
@@ -133,6 +134,7 @@ class Controller(QObject):
         project: QgsProject | None = None,
         cache_root: Path | None = None,
         discovery_override: Callable[[], str | None] | None = None,
+        discovery_extra: Callable[[], list[str]] | None = None,
         lang: Callable[[], str | None] = default_lang,
         client_version: str = "0.1.0",
         parent: QObject | None = None,
@@ -142,7 +144,10 @@ class Controller(QObject):
         self.cache_root = Path(cache_root) if cache_root else default_cache_root()
         self._lang = lang
         self.connector = Connector(
-            client_version, discovery_override or _setting_override, self
+            client_version,
+            discovery_override or _setting_override,
+            self,
+            extra=discovery_extra or extra_discovery_locations,
         )
         self._caches: dict[str, ProjectCache] = {}
         self._syncs: dict[str, ProjectSync] = {}
@@ -738,6 +743,19 @@ class Controller(QObject):
         sync = self._syncs.get(project_id)
         if sync is not None:
             sync.detach()
+
+
+def extra_discovery_locations() -> list[str]:
+    """Folders or files from the panel's "Other locations", one per line."""
+    value = QgsSettings().value(SETTING_EXTRA_DISCOVERY, "")
+    if not isinstance(value, str):
+        return []
+    return [line.strip() for line in value.splitlines() if line.strip()]
+
+
+def set_extra_discovery_locations(locations: list[str]) -> None:
+    text = "\n".join(line.strip() for line in locations if line.strip())
+    QgsSettings().setValue(SETTING_EXTRA_DISCOVERY, text)
 
 
 def _setting_override() -> str | None:

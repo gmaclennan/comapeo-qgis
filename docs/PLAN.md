@@ -64,7 +64,7 @@ The full contract is `docs/PROTOCOL.md` in the `comapeo-local-api` repo; that fi
 | `subscribe(projectId)`, `unsubscribe(projectId)` | then notifications: `layer.changed` (ids of features created, updated or deleted) and `layer.schemaChanged` (columns or categories changed) |
 | phase 2: `features.update`, `features.delete` | new version, or a conflict / not-permitted error |
 
-There is no notification for projects joined or left, and `hello` does not report the app's build type: the plugin re-lists projects every 10 seconds, and tells builds apart by the app folder its discovery file was found in.
+There is no notification for projects joined or left, and `hello` has no build-type field (its app name carries the build, such as "CoMapeo Desktop Internal"): the plugin re-lists projects every 10 seconds, and tells builds apart by the location its discovery file was found in. Installed builds keep it in their data folder under the system's app-data folder; development builds keep their data in the desktop checkout, so the user lists such locations in the panel or in `COMAPEO_LOCAL_API_DISCOVERY_EXTRA`, and each listed location counts as a build of its own.
 
 A layer is a definition (document type + filter + columns) supplied by the server. Version 1 returns exactly two per project: all observations, all tracks. When CoMapeo standardises its data structures, the server can return more definitions and existing plugins pick them up.
 
