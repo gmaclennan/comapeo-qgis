@@ -14,7 +14,6 @@ from qgis.core import (
     QgsApplication,
     QgsFeatureRequest,
     QgsMapLayer,
-    QgsMessageLog,
     QgsProject,
     QgsSettings,
     QgsVectorLayer,
@@ -665,9 +664,10 @@ class Controller(QObject):
                 self._origins[project_id] = build_type
             self._gone.discard(project_id)
             cache = self.cache(project_id)
-            if full or new or renamed:
-                self._set_aside_if_damaged(project_id)
             moved = serving and cache.exists and cache.build_type() != build_type
+            # Before writing: metadata written into a damaged file would hide it.
+            if full or new or renamed or moved:
+                self._set_aside_if_damaged(project_id)
             if cache.exists and (full or new or renamed or moved):
                 with contextlib.suppress(CacheError):
                     cache.set_project(project, build_type if serving else None)
@@ -772,24 +772,7 @@ class Controller(QObject):
     def _set_aside_if_damaged(self, project_id: str) -> None:
         """With the app at hand a damaged cache is moved aside and refetched; the
         map layers are pointed at the new tables as they are created."""
-        cache = self.cache(project_id)
-        if not cache.is_damaged():
-            return
-        try:
-            aside = cache.set_aside()
-        except OSError as err:
-            QgsMessageLog.logMessage(
-                f"Cannot move the damaged cache {cache.path} aside: {err}",
-                "CoMapeo",
-                Qgis.MessageLevel.Warning,
-            )
-            return
-        QgsMessageLog.logMessage(
-            f"The cache {cache.path} could not be read; moved it to {aside.name} "
-            "and downloading the project again.",
-            "CoMapeo",
-            Qgis.MessageLevel.Info,
-        )
+        self.cache(project_id).set_aside_if_damaged()
 
     def _on_layers_added(self, layers: list[QgsMapLayer]) -> None:
         touched = set()

@@ -221,6 +221,7 @@ class ProjectSync(QObject):
             for item in (layers_result or {}).get("layers", [])
             if isinstance(item, dict)
         }
+        self.cache.set_aside_if_damaged()
         try:
             if categories_result != self.cache.raw_categories():
                 self.cache.set_categories(categories_result)

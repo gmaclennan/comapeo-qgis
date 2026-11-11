@@ -27,7 +27,7 @@ from tests.qgis.conftest import (
     use_discovery,
     wait_until,
 )
-from tests.qgis.helpers import comapeo_map_layers, rows
+from tests.qgis.helpers import comapeo_map_layers, held_lock, rows
 from tests.qgis.test_browser_model import child_index
 
 DAMAGED = b"this is not a GeoPackage\n" * 200
@@ -266,3 +266,72 @@ def test_copies_set_aside_within_one_second_are_all_kept(monkeypatch, folder):
     assert kept == {b"copy 0", b"copy 1", b"copy 2"}
     cache.remove()
     assert os.listdir(folder) == []
+
+
+def file_version(path: str) -> tuple[int, int]:
+    st = os.stat(path)
+    return st.st_mtime_ns, st.st_size
+
+
+def test_damage_written_while_the_cache_is_open_is_found_on_refresh(
+    iface, fake, folder
+):
+    project_file, cache, _styling = save_project_with_layers(iface, fake, folder)
+    fake.projects["p1"].features["observations"].append(observation("c"))
+    plugin = CoMapeoPlugin(iface)
+    try:
+        assert QgsProject.instance().read(project_file)
+        plugin.initGui()
+        controller = plugin.controller
+        [observations] = comapeo_map_layers("observations")
+        wait_until(lambda: set(rows(observations)) == {"a", "b", "c"})
+        wait_until(lambda: not controller.project_status("p1").busy)
+        assert not controller.project_status("p1").damaged
+        holder = sqlite3.connect(cache, isolation_level=None)
+        try:
+            assert holder.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+            before = file_version(cache)
+            holder.execute("DROP TABLE comapeo_meta")
+            # The change sits in the write-ahead log; the main file is untouched.
+            assert file_version(cache) == before
+            assert "no such table" in (sqlite_error(cache) or "")
+            in_place = os.name == "nt"
+            plugin.dock.refresh_button.click()
+            if not in_place:
+                wait_until(moved_aside, message="damaged cache set aside")
+        finally:
+            holder.close()
+        wait_until(lambda: sqlite_error(cache) is None, message="rebuilt")
+        wait_until(lambda: set(rows(observations)) == {"a", "b", "c"})
+        wait_until(lambda: controller.project_status("p1").last_refresh is not None)
+    finally:
+        plugin.unload()
+
+
+def test_a_damaged_cache_first_checked_under_a_lock_is_checked_again(
+    iface, fake, folder
+):
+    project_file, cache, _styling = save_project_with_layers(iface, fake, folder)
+    damage(cache, "no comapeo_meta")
+    plugin = CoMapeoPlugin(iface)
+    try:
+        with held_lock(cache):
+            before = file_version(cache)
+            plugin.initGui()
+            assert QgsProject.instance().read(project_file)
+            controller = plugin.controller
+            wait_until(lambda: controller.connected, message="connected")
+            plugin.dock.refresh_button.click()
+            pump(300)
+            assert moved_aside() == []
+        # The lock was given up without a write: the file looks just as it did.
+        assert file_version(cache) == before
+        plugin.dock.refresh_button.click()
+        in_place = os.name == "nt"
+        if not in_place:
+            wait_until(moved_aside, message="damaged cache set aside")
+        [observations] = comapeo_map_layers("observations")
+        wait_until(lambda: sqlite_error(cache) is None, message="rebuilt")
+        wait_until(lambda: set(rows(observations)) == {"a", "b"})
+    finally:
+        plugin.unload()

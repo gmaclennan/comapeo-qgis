@@ -40,6 +40,7 @@ from qgis.core import (
     QgsFields,
     QgsGeometry,
     QgsLineString,
+    QgsMessageLog,
     QgsPoint,
     QgsProviderRegistry,
     QgsVectorFileWriter,
@@ -306,16 +307,40 @@ class ProjectCache:
         return self.path.is_file()
 
     def is_damaged(self) -> bool:
-        """The file exists but is not a readable cache. Remembered per file
-        version, as statuses ask often."""
-        try:
-            st = self.path.stat()
-        except OSError:
+        """The file exists but is not a readable cache. Statuses ask often, so a
+        definite answer is remembered until the file or its write-ahead log
+        changes; while the file is locked the answer is no, and not remembered."""
+        version = _file_version(self.path)
+        if version is None:
             return False
-        version = (st.st_mtime_ns, st.st_size)
         if self._checked is None or self._checked[0] != version:
-            self._checked = (version, _unreadable(self.path))
+            damaged = _damaged(self.path)
+            if damaged is None:
+                return False
+            self._checked = (version, damaged)
         return self._checked[1]
+
+    def set_aside_if_damaged(self) -> None:
+        """Call before writing: metadata written into a damaged file would hide
+        the damage. Windows will not rename an open file; the writes then repair
+        it in place."""
+        if not self.is_damaged():
+            return
+        try:
+            aside = self.set_aside()
+        except OSError as err:
+            QgsMessageLog.logMessage(
+                f"Cannot move the damaged cache {self.path} aside: {err}",
+                "CoMapeo",
+                Qgis.MessageLevel.Warning,
+            )
+            return
+        QgsMessageLog.logMessage(
+            f"The cache {self.path} could not be read; moved it to {aside.name} "
+            "and downloading the project again.",
+            "CoMapeo",
+            Qgis.MessageLevel.Info,
+        )
 
     def set_aside(self) -> Path:
         """Rename the file (and SQLite's side files) out of the way, so a fresh
@@ -841,25 +866,40 @@ def project_in_file(path: Path) -> Project | None:
     return None
 
 
-def _unreadable(path: Path) -> bool:
+def _file_version(path: Path) -> tuple[Any, ...] | None:
+    """Changes whenever the file's content may have: in write-ahead-log mode a
+    write lands in the -wal file and leaves the main file as it was."""
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    try:
+        wal = Path(f"{path}-wal").stat()
+        logged: tuple[int, int] | None = (wal.st_mtime_ns, wal.st_size)
+    except OSError:
+        logged = None
+    return (st.st_mtime_ns, st.st_size, logged)
+
+
+def _damaged(path: Path) -> bool | None:
     """Whether SQLite reports the file as no database, a malformed one or one
-    without our metadata; a lock, a permission or a disk problem is not damage."""
+    without our metadata; None when it cannot tell (a lock, a permission or a
+    disk problem), which is not damage."""
     try:
-        conn = sqlite3.connect(
-            f"{path.resolve().as_uri()}?mode=ro", uri=True, timeout=0
-        )
-    except sqlite3.Error:
-        return False
-    try:
-        conn.execute("SELECT key, value FROM comapeo_meta LIMIT 1").fetchall()
+        with _reading(path) as conn:
+            conn.execute("SELECT key, value FROM comapeo_meta LIMIT 1").fetchall()
+    except CacheLocked:
+        return None
     except sqlite3.DatabaseError as err:
         text = str(err).lower()
-        return any(
+        if any(
             words in text
             for words in ("not a database", "malformed", "no such table: comapeo_meta")
-        )
-    finally:
-        conn.close()
+        ):
+            return True
+        return None
+    except sqlite3.Error:
+        return None
     return False
 
 
