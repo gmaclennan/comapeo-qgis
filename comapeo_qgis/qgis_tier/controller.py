@@ -534,7 +534,8 @@ class Controller(QObject):
         )
         if layer.isEditable():
             hook = self._hooks.get(layer.id())
-            if hook is not None and not allowed:
+            # Only what the app says: a dropped connection usually comes back.
+            if hook is not None and live is not None and live.editable is not True:
                 hook.editing_lost(message)
             return
         if not force and self._edit_keys.get(layer.id()) == key:
