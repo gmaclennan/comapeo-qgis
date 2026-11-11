@@ -307,6 +307,7 @@ class Controller(QObject):
 
     def _retry_media(self) -> None:
         self.media.retry_not_synced()
+        self.fetcher.clear_errors()
         self.mediaRetry.emit()
 
     # Media
