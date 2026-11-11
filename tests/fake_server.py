@@ -9,10 +9,14 @@ gives. What the dev server cannot be made to do is set on the instance and may
 change at any time: `allow_edits` (None: a server that predates editing, with
 no editing members and no editing methods), `role` ("coordinator", "member" or
 "blocked"), `edit_delay` (seconds before each edit is answered),
-`concurrent_next` (the next edit meets a change landing at the same moment),
+`concurrent_next` (the next edit meets a change landing at the same moment;
+"kept" makes a delete overlap a write that CoMapeo then shows, so the
+observation stays), `quiet_next` (the next edit sends no `layer.changed`),
 `changes_before_edit` (callables run inside the next edit, before the version
-check: a change from elsewhere) and `drop_after_edits` (after that many edits
-are answered, the next is applied and the connection dropped before replying).
+check: a change from elsewhere), `drop_after_edits` (after that many edits
+are answered, the next is applied and the connection dropped before replying)
+and `layers_gate` (a threading.Event that `layers.list` waits for while it is
+not set; the connection answers nothing else meanwhile).
 """
 
 from __future__ import annotations
@@ -287,7 +291,9 @@ class FakeServer:
         self.allow_edits: bool | None = allow_edits
         self.role = "coordinator"
         self.edit_delay = 0.0
-        self.concurrent_next = False
+        self.concurrent_next: bool | str = False
+        self.quiet_next = False
+        self.layers_gate: threading.Event | None = None
         self.changes_before_edit: list[Any] = []
         self.drop_after_edits: int | None = None
         self._edits = 0
@@ -408,6 +414,9 @@ class FakeServer:
                 )
                 if editing and self.edit_delay:
                     time.sleep(self.edit_delay)
+                gate = self.layers_gate
+                if message.get("method") == "layers.list" and gate is not None:
+                    gate.wait(30)
                 reply = self._dispatch(conn, message)
                 limit = self.drop_after_edits
                 if editing and limit is not None and self._edits >= limit:
@@ -655,15 +664,20 @@ class FakeServer:
         category_id = params.get("categoryId", feature.get("categoryId"))
         columns = {c["name"]: c for c in layer.get("columns", [])}
         properties = params.get("properties") or {}
+        categories = {c["categoryId"]: c for c in project.categories}
+        if "categoryId" in params:
+            category = categories.get(category_id)
+            if category is None:
+                data = {"target": "category", "reason": "unknown-category"}
+                raise _Failure("INVALID_VALUE", "unknown category", data)
+            if layer.get("geometryType") not in (category.get("geometryTypes") or []):
+                data = {"target": "category", "reason": "category-not-for-layer"}
+                raise _Failure("INVALID_VALUE", "category not for layer", data)
         for name in properties:
             allowed = columns[name].get("categoryIds")
             if allowed is not None and category_id not in allowed:
                 data = {"target": "column", "column": name, "reason": "not-in-category"}
                 raise _Failure("NOT_EDITABLE", "not in category", data)
-        categories = {c["categoryId"]: c for c in project.categories}
-        if "categoryId" in params and category_id not in categories:
-            data = {"target": "category", "reason": "unknown-category"}
-            raise _Failure("INVALID_VALUE", "unknown category", data)
         for name, value in properties.items():
             options = [o["value"] for o in columns[name].get("options") or []]
             if value is not None and options and value not in options:
@@ -692,16 +706,22 @@ class FakeServer:
     def _delete(self, params: dict[str, Any]) -> dict[str, Any]:
         project, layer, params, forks = self._edit_target(params, "delete")
         self._check_offered(layer, params, "delete")
-        self._check_feature(project, layer, params, forks)
+        feature = self._check_feature(project, layer, params, forks)
+        result: dict[str, Any] = {"id": params["id"]}
+        overlap, self.concurrent_next = self.concurrent_next, False
+        if overlap:
+            result["concurrent"] = True
+        if overlap == "kept":
+            # The other write is shown; the deletion is kept beside it.
+            feature["forks"] = [self._new_version()]
+            feature["version"] = self._new_version()
+            feature["properties"]["notes"] = "written at the same moment"
+            return result
         features = project.features[layer["layerId"]]
         project.features[layer["layerId"]] = [
             f for f in features if f["id"] != params["id"]
         ]
         project.deleted.add(params["id"])
-        result: dict[str, Any] = {"id": params["id"]}
-        if self.concurrent_next:
-            self.concurrent_next = False
-            result["concurrent"] = True
         return result
 
     def _new_version(self) -> str:
@@ -710,6 +730,9 @@ class FakeServer:
 
     def _after_edit(self, message: dict[str, Any], reply: Any) -> None:
         if not isinstance(reply, dict) or "result" not in reply:
+            return
+        if self.quiet_next:
+            self.quiet_next = False
             return
         params = message.get("params") or {}
         self.notify(
