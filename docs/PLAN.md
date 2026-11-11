@@ -22,9 +22,15 @@ A QGIS plugin that shows the observations and tracks of a CoMapeo project as lay
 
 ### Phase 2 (editing)
 
-- Change field values and notes, change category, move a point, delete an observation. This matches what desktop's own UI allows.
-- The role rule (members edit only their own observations) is enforced by the local API, not the plugin.
-- A save is refused if the observation changed in CoMapeo since QGIS fetched it; the layer is refreshed. QGIS never creates a fork.
+Built (milestone 7), against the editing additions to protocol version 1 in `comapeo-local-api`.
+
+- Change notes and the answers to the fields of an observation's own category, change category, delete an observation, with QGIS's normal editing tools. Choices offer only the field's options plus "no value"; a value outside the options is refused by the server, and no value removes the answer.
+- Editing needs its own opt-in on the server (`allowEdits`, off by default; CoMapeo Desktop will get a second setting for it). Layers carry flags saying what can be edited and why not; a server that predates editing reads as read-only.
+- The role rule (members edit only observations created on their device) is enforced by the local API; the plugin shows it, greying other devices' observations and warning on the first change to one.
+- A save is refused if the observation changed in CoMapeo since QGIS fetched it, including a late version from another device (the client sends the version and the other versions it saw); the layer then shows CoMapeo's data. QGIS never creates a fork itself. An observation that was already forked is updated on the version shown only, as CoMapeo Desktop does; to be revisited.
+- Not yet: moving a point (switched off for now; the protocol keeps room to add it), giving or removing a location, date and multiple-choice fields (accepted by the server, read-only in the plugin until their widgets are worked out), creating observations, editing tracks.
+
+How a save works: in `beforeCommitChanges` the plugin reads the edit buffer, empties it by undoing everything, sends one `features.update` or `features.delete` per feature with the version and forks the row had when first changed, and blocks on its socket (no event loop) for up to 15 s; the cache is written only from the server's replies. When the save cannot go ahead at all (not connected, editing switched off, an earlier save unanswered, a large save cancelled) the commit is made to fail so the edits stay in the session. While a layer has unsaved edits, or a save is unanswered, its live updates are held.
 
 ### Out
 
@@ -62,7 +68,7 @@ The full contract is `docs/PROTOCOL.md` in the `comapeo-local-api` repo; that fi
 | `layers.getFeatures(projectId, layerId, lang, limit, cursor, ids)` | paged rows: id, version, geometry, column values, attachments with media URLs |
 | `categories.list(projectId, lang)` | id, name, colour, icon (SVG inline, PNG fallback) |
 | `subscribe(projectId)`, `unsubscribe(projectId)` | then notifications: `layer.changed` (ids of features created, updated or deleted) and `layer.schemaChanged` (columns or categories changed) |
-| phase 2: `features.update`, `features.delete` | new version, or a conflict / not-permitted error |
+| `features.update`, `features.delete` (editing, an addition within version 1) | the feature as it now stands, or an error saying why not (conflict, not permitted, not editable, invalid value) |
 
 There is no notification for projects joined or left, and `hello` has no build-type field (its app name carries the build, such as "CoMapeo Desktop Internal"): the plugin re-lists projects every 10 seconds, and tells builds apart by the location its discovery file was found in. Installed builds keep it in their data folder under the system's app-data folder; development builds keep their data in the desktop checkout, so the user lists such locations in the panel or in `COMAPEO_LOCAL_API_DISCOVERY_EXTRA`, and each listed location counts as a build of its own.
 
@@ -88,7 +94,7 @@ Three tiers, kept separate so most logic is testable without QGIS:
 Data handling:
 
 - Cache: one GeoPackage per CoMapeo project in the QGIS profile folder, shared by every QGIS project that uses it. Not beside the `.qgz`, so sending someone a project file does not hand over the data.
-- Layers are flagged read-only in version 1.
+- Layers are read-only unless the connected app allows editing them (phase 2).
 - Built-in columns in plain snake_case: id, category, created and updated time, created-by and updated-by device names, GPS accuracy, altitude, photo and audio counts. A `comapeo_` prefix only where a tag key collides. Field columns are named by tag key and are not translated; display values and labels follow the QGIS interface language where CoMapeo has a translation.
 - Multi-value fields are list columns. When categories change, the layer schema is rebuilt on refresh.
 - Tracks: one line per track with start time, end time and category; per-point timestamps as the geometry's M value.
@@ -115,7 +121,7 @@ Data handling:
 | 4 | Media panel | Selecting an observation shows its photos and plays or opens its audio; unsynced media shows a placeholder. |
 | 5 | Desktop branch | With the setting on in a locally built desktop, the plugin finds and connects to it; Playwright test passes. |
 | 6 | Live updates | A document created or synced in desktop appears in QGIS without pressing refresh. |
-| 7 | Editing (phase 2) | The agreed edits round-trip; a stale save is refused; a member cannot edit another's observation. |
+| 7 | Editing (phase 2) | Built. The agreed edits round-trip; a stale save and a late losing fork are refused; a member cannot edit another's observation. |
 
 ## Risks and open points
 
@@ -124,6 +130,6 @@ Data handling:
 - **Windows pipe permissions.** Another local user can open the pipe read-only. The secret handshake is what protects the data; the server must send nothing before it.
 - **Media server has no token.** Core's HTTP server on `127.0.0.1` serves blobs to any local process that finds the port. This is existing behaviour and unchanged by this work.
 - **Audio playback.** Modules import everywhere tested, but playback is unproven, and the Qt5 and Qt6 player APIs differ.
-- **Core behaviours to verify for phase 2.** Whether an update from a stale version forks or errors; that core does not enforce the role rule itself.
+- **Editing limits from core.** Core cannot check a version and write in one step, so another change can land in the moment between the server's check and its write; the server reports it (`concurrent`) and the plugin fetches the feature again and says so. A change made on another device that has not yet synced cannot be seen and forks when it arrives, as between any two devices.
 - **Not yet tested.** Electron's Node as the socket server; the client inside a running QGIS window on Windows.
 - **Spike repo.** `gmaclennan/comapeo-qgis-spike` can be deleted once this repo's Windows CI job replaces it.

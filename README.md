@@ -1,8 +1,8 @@
 # CoMapeo for QGIS
 
-A QGIS plugin that shows the observations and tracks of a CoMapeo project as layers, with category icons, photos and audio. It connects to CoMapeo Desktop running on the same computer through the CoMapeo local API. Version 1 is view-only.
+A QGIS plugin that shows the observations and tracks of a CoMapeo project as layers, with category icons, photos and audio, and lets you edit observations. It connects to CoMapeo Desktop running on the same computer through the CoMapeo local API.
 
-Status: early development. Observations and tracks show as read-only layers with category icons, kept in a local cache and updated live. Selecting one observation shows its photos and audio in the CoMapeo panel. Scope and design are in [docs/PLAN.md](docs/PLAN.md). The wire contract is `docs/PROTOCOL.md` in the `comapeo-local-api` repository.
+Status: early development. Observations and tracks show as layers with category icons, kept in a local cache and updated live. Selecting one observation shows its photos and audio in the CoMapeo panel. Where CoMapeo Desktop allows it, observations can be edited with QGIS's normal editing tools (see [Editing](#editing)). Scope and design are in [docs/PLAN.md](docs/PLAN.md). The wire contract is `docs/PROTOCOL.md` in the `comapeo-local-api` repository.
 
 Continuous integration runs the tests on QGIS 3.44 (Qt5) and the current 4.x release (Qt6), on Linux (the official `qgis/qgis` Docker images) and Windows (OSGeo4W), against the `@comapeo/local-api` dev server; on Windows the plugin connects to it over a named pipe. The plain-Python tests also run on macOS, Linux and Windows under Python 3.9 and 3.12. QGIS 4.0 and 4.2 on macOS are tested locally, and by hand in a real QGIS window. Not yet tested: QGIS 3.40, the QGIS macOS app in CI, and CoMapeo Desktop itself (only the dev server). On Windows the Python fake server and test driver use named pipes, so the same tests run there; only checks of POSIX file permissions are skipped.
 
@@ -35,7 +35,7 @@ cd ../comapeo-local-api && fnm exec --using=24 npm run dev -- --discovery-dir /t
 # into the profile's python/plugins as comapeo_qgis
 ```
 
-Type `create`, `update`, `delete` or `category` into the dev server to see live updates.
+Type `create`, `update`, `delete` or `category` into the dev server to see live updates. Add `--allow-edits` to try editing, and `--as-member` to serve as a participant of a project another, in-process device created (`help` lists the commands for that device).
 
 `scripts/smoke-e2e.sh --media` checks the photo and audio panel in a real QGIS window the same way, with screenshots prefixed `media-`.
 
@@ -52,6 +52,16 @@ The app and QGIS both run under a throwaway HOME inside `--work`, which is empti
 The plugin finds a running app through its discovery file, connects over a local socket and keeps a GeoPackage per CoMapeo project in the QGIS profile folder (`comapeo/cache/`). Map layers read from that file, so they still show the last data fetched when the app is closed; they are then marked with a badge in the Layers panel and in the CoMapeo panel. A layer whose first download did not finish says so in its own badge; the project's row in the panel names those layers. Layers are styled once, when first added, with one category per CoMapeo category (for tracks, only the categories tracks use, adding others as they appear); "Reset to CoMapeo style" in the layer's context menu restores it.
 
 Select one observation on a CoMapeo layer and the CoMapeo panel shows its photos as thumbnails; click one for a larger view, and "Open original" downloads the full-size photo and opens it in the system's image viewer. Audio plays in the panel, with "Open in player" beside it in case it does not play there; video opens in the system's player. Photos that have not synced to this computer yet show a "Not yet synced" placeholder and are tried again when you press Refresh, as is a file whose download failed or was cut off (a partial file is never kept). Thumbnails and larger views are fetched when first shown and kept in `comapeo/media/` in the QGIS profile folder, beside the layer cache; originals are only fetched when opened, or for a whole project with "Download all media". With CoMapeo Desktop closed, the panel shows whatever was saved. "Remove cached data" deletes a project's media as well as its layers. There is no size limit on the media folder yet.
+
+## Editing
+
+When CoMapeo Desktop allows editing from QGIS (a separate setting, off unless switched on), the observations layer can be edited with Toggle Editing, the attribute table or form, Delete Selected and Save Layer Edits. You can change notes and the answers to the fields of an observation's own category, change its category (the "Category" column, a list of the project's categories) and delete it. Choices offer the field's options and "(no value)". Not offered yet: creating observations, moving a point, editing date and multiple-choice fields, and editing tracks. A change the plugin cannot send (a moved point, a new feature, a field the observation's category does not have, a locked column) is discarded at save with a message saying so.
+
+Saving sends each changed observation to CoMapeo Desktop, which checks it and answers; QGIS waits for the answers (up to 15 seconds) and the layer then shows what CoMapeo holds. QGIS itself never writes your edits to the cache. A change is refused if the observation changed in CoMapeo since QGIS showed it (including a version arriving from another device), if your role does not allow it (a participant can change only observations created on this device; others are shown in grey in the attribute table), or if CoMapeo does not accept the value; the message bar says how many changes were saved and, under "Show more", why each of the others was not. If CoMapeo Desktop is not connected, has editing switched off, or is still answering an earlier save, the save is stopped and your edits stay in the edit session. While a layer has unsaved edits its live updates wait, so what you edit is what you saw. Above 500 changes the plugin asks before saving. If the connection is lost during a save, the plugin later checks which of the unconfirmed changes reached CoMapeo and lists those that did not.
+
+A CoMapeo Desktop that predates editing leaves the layers read-only, and the plugin says to update it.
+
+`scripts/smoke-e2e.sh --edit` checks editing in a real QGIS window against the dev server (screenshots prefixed `edit-`).
 
 ## Licence
 
