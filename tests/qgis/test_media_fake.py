@@ -162,3 +162,29 @@ def test_a_url_off_this_computer_is_never_fetched(plugin, fake, http):
     select(layer, ["a"])
     wait_until(lambda: [i.text() for i in photo_items(panel)] == ["Could not load"])
     assert media_files() == []
+
+
+def test_download_all_media_can_be_cancelled(plugin, fake, http):
+    a = observation("a")
+    a["attachments"] = [photo(http, "one", "#ff0000"), photo(http, "two", "#00ff00")]
+    start(plugin, fake, [a])
+    dock = plugin.dock
+    dock.projects.topLevelItem(0).setSelected(True)
+    for variant in ("thumbnail", "preview", "original"):
+        http.hold(f"/blobs/two/{variant}")
+    dock.download_button.click()
+    assert not dock.cancel_download_button.isHidden()
+    wait_until(lambda: len(media_files()) == 3, message="the files not held back")
+    dock.cancel_download_button.click()
+    wait_until(lambda: dock.cancel_download_button.isHidden())
+    assert dock.download_message.text().startswith(
+        "Cancelled. Media files: 3 downloaded"
+    )
+    for variant in ("thumbnail", "preview", "original"):
+        http.release(f"/blobs/two/{variant}")
+    pump(300)
+    assert (
+        sorted(p.parent.name for p in media_files())
+        == [media_files()[0].parent.name] * 3
+    )
+    assert not any(p.name.startswith(".part-") for p in media_files())
