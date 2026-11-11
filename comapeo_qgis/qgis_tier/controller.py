@@ -71,8 +71,14 @@ class ProjectStatus:
     error: str | None
     warning: str | None
     offered: bool = False
-    # Some cached layer has never finished a full fetch.
-    incomplete: bool = False
+    # Titles of the cached layers that have never finished a full fetch.
+    incomplete_layers: tuple[str, ...] = ()
+    # The oldest refresh of the layers that have finished one.
+    complete_refresh: datetime | None = None
+
+    @property
+    def incomplete(self) -> bool:
+        return bool(self.incomplete_layers)
 
     @property
     def stale(self) -> bool:
@@ -81,30 +87,41 @@ class ProjectStatus:
     def describe(self) -> str:
         when = format_time(self.last_refresh)
         if self.gone:
-            if self.incomplete:
+            if self.incomplete and self.complete_refresh is None:
                 return (
                     "No longer available in CoMapeo Desktop. The first download "
                     "did not finish, so the cached data is incomplete. You can "
                     "remove the cached data."
                 )
             return (
-                "No longer available in CoMapeo Desktop. Showing data cached "
-                f"{when}. You can remove the cached data."
+                f"No longer available in CoMapeo Desktop. {self._cached()} You can "
+                "remove the cached data."
             )
         if not self.connected:
             if self.offered:
                 return "Not on the map."
-            if self.incomplete:
+            if self.incomplete and self.complete_refresh is None:
                 return (
                     "Not connected. The first download did not finish, so this "
                     "data is incomplete."
                 )
-            return f"Not connected. Showing data cached {when}."
+            return f"Not connected. {self._cached()}"
         if self.error:
             return self.error
         if self.busy:
             return "Updating…"
         return f"Up to date (last updated {when})."
+
+    def _cached(self) -> str:
+        if not self.incomplete:
+            return f"Showing data cached {format_time(self.last_refresh)}."
+        *rest, last = self.incomplete_layers
+        names = f"{', '.join(rest)} and {last}" if rest else last
+        which = "they are" if rest else "that layer is"
+        return (
+            f"Showing data cached {format_time(self.complete_refresh)}. The first "
+            f"download of {names} did not finish, so {which} incomplete."
+        )
 
 
 def format_time(value: datetime | None) -> str:
@@ -268,16 +285,28 @@ class Controller(QObject):
         return sorted(ids)
 
     def project_status(self, project_id: str) -> ProjectStatus:
-        sync = self._syncs.get(project_id)
+        """The project as a whole; the oldest refresh of any of its layers."""
         cache = self.cache(project_id)
+        tables = list(cache.tables().values()) if cache.exists else []
+        return self._status(project_id, tables)
+
+    def layer_status(self, project_id: str, layer_id: str) -> ProjectStatus:
+        """As project_status, but only this layer's download counts."""
+        cache = self.cache(project_id)
+        info = cache.table(layer_id) if cache.exists else None
+        if info is None:
+            return self.project_status(project_id)
+        return self._status(project_id, [info])
+
+    def _status(self, project_id: str, tables: list[TableInfo]) -> ProjectStatus:
+        sync = self._syncs.get(project_id)
         stamps = []
-        incomplete = False
-        if cache.exists:
-            for info in cache.tables().values():
-                try:
-                    stamps.append(datetime.fromisoformat(info.last_refresh or ""))
-                except (TypeError, ValueError):
-                    incomplete = True
+        incomplete = []
+        for info in tables:
+            try:
+                stamps.append(datetime.fromisoformat(info.last_refresh or ""))
+            except (TypeError, ValueError):
+                incomplete.append(info.definition.title or info.layer_id)
         return ProjectStatus(
             project_id=project_id,
             name=self.project_name(project_id),
@@ -289,7 +318,8 @@ class Controller(QObject):
             error=sync.error if sync else None,
             warning=sync.warning if sync else None,
             offered=project_id in self._served and sync is None,
-            incomplete=incomplete,
+            incomplete_layers=tuple(incomplete),
+            complete_refresh=min(stamps) if stamps else None,
         )
 
     def cache(self, project_id: str) -> ProjectCache:

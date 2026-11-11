@@ -18,6 +18,7 @@ from tests.fake_server import (
     _Failure,
     default_layers,
     observation,
+    track,
 )
 from tests.qgis.conftest import process_events, pump, use_discovery, wait_until
 from tests.qgis.helpers import rows
@@ -25,6 +26,9 @@ from tests.qgis.test_browser_model import child_index
 
 INCOMPLETE = (
     "Not connected. The first download did not finish, so this data is incomplete."
+)
+OBSERVATIONS_INCOMPLETE = (
+    "The first download of Observations did not finish, so that layer is incomplete."
 )
 
 
@@ -311,7 +315,8 @@ def test_last_updated_is_unknown_until_every_layer_was_fetched(plugin, fake):
 
     fake.stop()
     wait_until(lambda: not controller.project_status("p1").connected)
-    assert controller.project_status("p1").describe() == INCOMPLETE
+    assert controller.layer_status("p1", "observations").describe() == INCOMPLETE
+    assert OBSERVATIONS_INCOMPLETE in controller.project_status("p1").describe()
 
 
 def test_wrong_secret_reads_as_not_running_and_sends_only_hello(plugin, fake):
@@ -369,13 +374,14 @@ def test_interrupted_first_download_reads_as_incomplete(iface):
         wait_until(lambda: not controller.project_status("p1").connected)
         wait_until(lambda: len(rows(layer)) == 1000, message="first page kept")
 
-        status = controller.project_status("p1")
+        status = controller.layer_status("p1", "observations")
         assert status.incomplete
         assert status.describe() == INCOMPLETE
         wait_until(lambda: plugin.indicators.stale_layers() == [layer.id()])
         assert badge_tooltips(plugin, layer) == [INCOMPLETE]
         wait_until(lambda: plugin.dock.projects.topLevelItem(0) is not None)
-        assert plugin.dock.projects.topLevelItem(0).text(1) == INCOMPLETE
+        row = plugin.dock.projects.topLevelItem(0).text(1)
+        assert OBSERVATIONS_INCOMPLETE in row, row
 
         plugin.unload()
         plugin = CoMapeoPlugin(iface)
@@ -385,9 +391,36 @@ def test_interrupted_first_download_reads_as_incomplete(iface):
             for map_layer in QgsProject.instance().mapLayers().values()
             if map_layer.customProperty("comapeo/layerId") == "observations"
         ]
-        assert plugin.controller.project_status("p1").describe() == INCOMPLETE
+        status = plugin.controller.layer_status("p1", "observations")
+        assert status.describe() == INCOMPLETE
         wait_until(lambda: plugin.indicators.stale_layers() == [reopened.id()])
         assert badge_tooltips(plugin, reopened) == [INCOMPLETE]
     finally:
         plugin.unload()
         server.stop()
+
+
+def test_only_the_layer_whose_first_download_failed_reads_as_incomplete(plugin, fake):
+    project = FakeProject("p1", "Fake project")
+    project.features["observations"] = [observation(f"o{i:04d}") for i in range(1500)]
+    project.features["tracks"] = [track("t1")]
+    controller = start(plugin, fake, project)
+    fake.fail_next(
+        "layers.getFeatures", "INTERNAL_ERROR", layerId="observations", cursor="0:1000"
+    )
+    observations, tracks = controller.add_project("p1")
+    wait_until(lambda: set(rows(tracks)) == {"t1"})
+    wait_until(lambda: controller.project_status("p1").error)
+    wait_until(lambda: not controller.project_status("p1").busy)
+    fake.stop()
+    wait_until(lambda: len(plugin.indicators.stale_layers()) == 2)
+
+    assert badge_tooltips(plugin, observations) == [INCOMPLETE]
+    [tracks_tip] = badge_tooltips(plugin, tracks)
+    assert tracks_tip.startswith("Not connected. Showing data cached on "), tracks_tip
+    assert "incomplete" not in tracks_tip
+    row = controller.project_status("p1").describe()
+    assert row.startswith("Not connected. Showing data cached on "), row
+    assert row.endswith(OBSERVATIONS_INCOMPLETE), row
+    wait_until(lambda: plugin.dock.projects.topLevelItem(0) is not None)
+    assert plugin.dock.projects.topLevelItem(0).text(1) == row

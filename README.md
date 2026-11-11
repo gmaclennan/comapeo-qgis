@@ -39,7 +39,7 @@ Type `create`, `update`, `delete` or `category` into the dev server to see live 
 
 ## How it works
 
-The plugin finds a running app through its discovery file, connects over a local socket and keeps a GeoPackage per CoMapeo project in the QGIS profile folder (`comapeo/cache/`). Map layers read from that file, so they still show the last data fetched when the app is closed; they are then marked with a badge in the Layers panel and in the CoMapeo panel. Layers are styled once, when first added, with one category per CoMapeo category; "Reset to CoMapeo style" in the layer's context menu restores it.
+The plugin finds a running app through its discovery file, connects over a local socket and keeps a GeoPackage per CoMapeo project in the QGIS profile folder (`comapeo/cache/`). Map layers read from that file, so they still show the last data fetched when the app is closed; they are then marked with a badge in the Layers panel and in the CoMapeo panel. A layer whose first download did not finish says so in its own badge; the project's row in the panel names those layers. Layers are styled once, when first added, with one category per CoMapeo category; "Reset to CoMapeo style" in the layer's context menu restores it.
 
 ## Licence
 
