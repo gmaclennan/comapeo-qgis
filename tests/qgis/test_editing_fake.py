@@ -842,3 +842,14 @@ def test_a_fault_in_the_plugin_before_sending_keeps_the_edits(
     assert fake.edits() == []
     wait_until(lambda: len(layer.editBuffer().changedAttributeValues()) == 1)
     assert "o2" not in rows(layer)
+
+
+def test_a_delete_that_stood_beside_another_write_is_removed(fake, plugin, iface):
+    layer = open_layer(fake, plugin)
+    fake.concurrent_next = True
+    fake.quiet_next = True
+    assert layer.startEditing()
+    assert layer.deleteFeature(fid(layer, "o2"))
+    assert layer.commitChanges()
+    wait_until(lambda: "o2" not in rows(layer), message="removed after the refetch")
+    assert "o2" not in {f["id"] for f in layer.dataProvider().getFeatures()}
