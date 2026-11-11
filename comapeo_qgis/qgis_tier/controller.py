@@ -532,7 +532,8 @@ class Controller(QObject):
                 self._origins[project_id] = build_type
             self._gone.discard(project_id)
             cache = self.cache(project_id)
-            self._set_aside_if_damaged(project_id)
+            if full or new or renamed:
+                self._set_aside_if_damaged(project_id)
             moved = serving and cache.exists and cache.build_type() != build_type
             if cache.exists and (full or new or renamed or moved):
                 with contextlib.suppress(CacheError):
