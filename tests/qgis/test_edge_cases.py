@@ -183,6 +183,24 @@ def test_selection_on_a_comapeo_layer_is_announced(plugin, fake):
     assert seen[-1] == ("p1", "observations", ["b"])
 
 
+def test_selection_survives_a_refresh_that_changes_rows(plugin, fake):
+    project = FakeProject("p1", "Fake project")
+    project.features["observations"] = [observation("a"), observation("b")]
+    controller = start(plugin, fake, project)
+    layer = synced(controller, "observations", {"a", "b"})
+    seen = []
+    controller.selectionChanged.connect(lambda *args: seen.append(args))
+    layer.selectByIds([rows(layer)["b"].id()])
+    project.features["observations"] = [
+        observation("a", version="v2", category="Clinic"),
+        observation("b"),
+    ]
+    plugin.dock.refresh_button.click()
+    wait_until(lambda: rows(layer)["a"]["category"] == "Clinic")
+    assert [f["id"] for f in layer.selectedFeatures()] == ["b"]
+    assert seen == [("p1", "observations", ["b"])]
+
+
 def test_png_category_icon_is_drawn_from_the_embedded_image(plugin, fake):
     icon = png_icon()
     project = FakeProject("p1", "Fake project")
