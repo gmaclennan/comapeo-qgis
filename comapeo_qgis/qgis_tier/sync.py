@@ -279,7 +279,17 @@ class ProjectSync(QObject):
                 self._pending_ids[layer_id] = set(rest)
         else:
             return
-        fetch = _Fetch(info, ids, self._generation, self.cache.versions(info), replaces)
+        try:
+            cached = self.cache.versions(info)
+        except CacheError as err:
+            if ids is None:
+                self._pending_full.add(layer_id)
+            else:
+                self._pending_ids.setdefault(layer_id, set()).update(ids)
+            self.error = str(err)
+            self.statusChanged.emit()
+            return
+        fetch = _Fetch(info, ids, self._generation, cached, replaces)
         self._fetches[layer_id] = fetch
         self.statusChanged.emit()
         self._page(fetch)
@@ -311,12 +321,14 @@ class ProjectSync(QObject):
         if error is not None:
             del self._fetches[layer_id]
             if error.code == INVALID_CURSOR and fetch.restarts < MAX_CURSOR_RESTARTS:
+                try:
+                    cached = self.cache.versions(fetch.info)
+                except CacheError as err:
+                    self.error = str(err)
+                    self.statusChanged.emit()
+                    return
                 again = _Fetch(
-                    fetch.info,
-                    fetch.ids,
-                    fetch.generation,
-                    self.cache.versions(fetch.info),
-                    fetch.replaces,
+                    fetch.info, fetch.ids, fetch.generation, cached, fetch.replaces
                 )
                 again.restarts = fetch.restarts + 1
                 self._fetches[layer_id] = again

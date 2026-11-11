@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import contextlib
+import subprocess
+import sys
+from collections.abc import Iterator
 from datetime import datetime, timezone
 from typing import Any
 
@@ -18,6 +22,38 @@ from qgis.PyQt.QtNetwork import QLocalSocket
 
 from comapeo_qgis.core.discovery import find_servers
 from tests.driver import BlockingClient
+
+_LOCKER = """
+import sqlite3, sys
+conn = sqlite3.connect(sys.argv[1], isolation_level=None)
+conn.execute("BEGIN EXCLUSIVE")
+print("locked", flush=True)
+sys.stdin.read()
+conn.rollback()
+"""
+
+
+@contextlib.contextmanager
+def held_lock(path: str) -> Iterator[None]:
+    """Another process holds an exclusive SQLite lock on the file, as a program
+    writing to it would; a lock in this process would not bind GDAL's connections.
+    In rollback-journal mode this keeps every reader out; the file is unchanged."""
+    holder = subprocess.Popen(
+        [sys.executable, "-c", _LOCKER, path],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert holder.stdout is not None and holder.stdin is not None
+        assert holder.stdout.readline().strip() == "locked"
+        yield
+    finally:
+        if holder.stdin is not None:
+            holder.stdin.close()
+        holder.wait(30)
+        if holder.stdout is not None:
+            holder.stdout.close()
 
 
 class QtBlockingClient(BlockingClient):
