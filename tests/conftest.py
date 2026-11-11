@@ -34,7 +34,8 @@ def pytest_runtest_makereport(item, call):
         report.outcome = "failed"
         report.longrepr = f"real_server skip under COMAPEO_REQUIRE_SERVER=1: {reason}"
     if report.when == "call" or (report.when == "setup" and not report.passed):
-        _counts[(real, report.outcome)] += 1
+        xfail = hasattr(report, "wasxfail")
+        _counts[(real, "xfailed" if xfail else report.outcome)] += 1
 
 
 def pytest_sessionfinish(session, exitstatus):
@@ -49,7 +50,7 @@ def pytest_terminal_summary(terminalreporter):
     for real, label in ((True, "real_server"), (False, "other")):
         counts = ", ".join(
             f"{_counts[(real, outcome)]} {outcome}"
-            for outcome in ("passed", "failed", "skipped")
+            for outcome in ("passed", "failed", "skipped", "xfailed")
         )
         lines.append(f"{label}: {counts}")
     if REQUIRE_SERVER and not _counts[(True, "passed")]:
