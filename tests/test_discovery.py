@@ -1,5 +1,6 @@
 import json
 import os
+import secrets
 import shutil
 import socket
 import subprocess
@@ -69,8 +70,9 @@ def test_ignores_unknown_properties_and_optional_ones_missing():
         json.dumps({**VALID, "secret": None}),
         json.dumps({**VALID, "protocolVersions": "1"}),
         json.dumps({**VALID, "protocolVersions": [True]}),
-        json.dumps({**VALID, "secret": "x" * 5000}),
-        "[" * 50_000 + "]" * 50_000,
+        pytest.param(json.dumps({**VALID, "secret": "x" * 5000}), id="long-secret"),
+        # Windows limits environment variables, PYTEST_CURRENT_TEST among them.
+        pytest.param("[" * 50_000 + "]" * 50_000, id="deep-nesting"),
         b"\xff\xfe",
     ],
 )
@@ -199,13 +201,30 @@ def test_real_oversized_file_is_reported_not_parsed(tmp_path: Path):
     assert result.error and not result.usable
 
 
+def missing_socket_path(directory: Path) -> str:
+    if sys.platform == "win32":
+        return "\\\\.\\pipe\\comapeo-local-api-" + secrets.token_hex(16)
+    return str(directory / "gone.sock")
+
+
 def test_real_file_with_a_missing_socket_is_stale(tmp_path: Path):
     write_private(
         tmp_path / DISCOVERY_FILENAME,
-        {**VALID, "socketPath": str(tmp_path / "gone.sock")},
+        {**VALID, "socketPath": missing_socket_path(tmp_path)},
     )
     [result] = find_servers(override=str(tmp_path))
     assert result.stale
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows named pipes")
+def test_real_file_with_a_listening_pipe_is_usable(tmp_path: Path):
+    from multiprocessing.connection import Listener
+
+    name = "\\\\.\\pipe\\comapeo-local-api-" + secrets.token_hex(16)
+    with Listener(name, family="AF_PIPE"):
+        write_private(tmp_path / DISCOVERY_FILENAME, {**VALID, "socketPath": name})
+        [result] = find_servers(override=str(tmp_path))
+        assert result.usable
 
 
 def test_the_secret_never_appears_in_repr():
