@@ -47,6 +47,7 @@ class _Job:
         self.file: Any = None
         self.aborted = False
         self.write_error: str | None = None
+        self.written = 0
 
 
 class MediaFetcher(QObject):
@@ -72,6 +73,17 @@ class MediaFetcher(QObject):
 
     def error(self, project_id: str, key: str, variant: str) -> str | None:
         return self._errors.get((project_id, key, variant))
+
+    def clear_errors(
+        self, project_id: str | None = None, keys: Sequence[str] | None = None
+    ) -> None:
+        """Forget failures so the next request fetches again; all of them by default."""
+        self._errors = {
+            k: v
+            for k, v in self._errors.items()
+            if (project_id is not None and k[0] != project_id)
+            or (keys is not None and k[1] not in keys)
+        }
 
     def fetch(self, project_id: str, attachment: Attachment, variant: str) -> bool:
         """Start a download unless one is running; False if there is no URL to use."""
@@ -135,6 +147,7 @@ class MediaFetcher(QObject):
                 )
                 job.file = open(job.partial, "wb")  # noqa: SIM115 - closed in _close
             job.file.write(data)
+            job.written += len(data)
         except OSError as err:
             job.write_error = err.strerror or str(err)
             job.reply.abort()
@@ -149,6 +162,20 @@ class MediaFetcher(QObject):
             return None
         return job.partial
 
+    def _complete(self, job: _Job) -> bool:
+        """Whether a 200 body arrived whole; a reply can fail after its headers."""
+        self._on_ready_read(job)
+        if (
+            job.write_error is not None
+            or job.reply.error() != QNetworkReply.NetworkError.NoError
+        ):
+            return False
+        length = job.reply.header(QNetworkRequest.KnownHeaders.ContentLengthHeader)
+        try:
+            return length is None or int(length) == job.written
+        except (TypeError, ValueError):
+            return True
+
     def _on_finished(self, job: _Job) -> None:
         key = (job.project_id, job.attachment.key, job.variant)
         if self._jobs.get(key) is job:
@@ -162,12 +189,16 @@ class MediaFetcher(QObject):
         elif job.write_error is not None:
             self._close(job, keep=False)
             self._errors[key] = f"Could not save the file: {job.write_error}"
-        elif job.reply.error() != QNetworkReply.NetworkError.NoError and status is None:
+        elif status is None or (
+            classify_status(status) is FetchOutcome.OK and not self._complete(job)
+        ):
             self._close(job, keep=False)
-            self._errors[key] = job.reply.errorString()
+            if job.write_error is not None:
+                self._errors[key] = f"Could not save the file: {job.write_error}"
+            else:
+                self._errors[key] = job.reply.errorString() or "The download stopped."
         else:
-            self._on_ready_read(job)
-            result = classify_status(status or 0)
+            result = classify_status(status)
             partial = self._close(job, keep=result is FetchOutcome.OK)
             if result is FetchOutcome.OK and partial is not None:
                 content_type = job.reply.header(
