@@ -217,6 +217,10 @@ def test_unreadable_feature_withholds_deletes_and_warns(plugin, fake):
     assert "could not read" in item.toolTip(1)
 
 
+@pytest.mark.skipif(
+    os.name != "posix" or os.geteuid() == 0,
+    reason="needs directory permissions that bind this user (not root)",
+)
 def test_cached_data_that_cannot_be_deleted_is_reported(plugin, fake, monkeypatch):
     project = FakeProject("p1", "Fake project")
     project.features["observations"] = [observation("a")]

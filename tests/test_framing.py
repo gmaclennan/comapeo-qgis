@@ -84,9 +84,15 @@ def test_encoding_refuses_oversize_messages():
         encode_frame({"secret": "x" * 5000}, max_size=4096)
 
 
-def test_deeply_nested_json_is_an_invalid_frame():
-    with pytest.raises(InvalidFrame):
-        FrameDecoder().feed(raw_frame(("[" * 100_000 + "]" * 100_000).encode()))
+def test_deeply_nested_json_is_refused_or_decoded_never_raised_raw():
+    # Python 3.14 parses this nesting; earlier versions hit RecursionError.
+    try:
+        [message] = FrameDecoder().feed(
+            raw_frame(("[" * 100_000 + "]" * 100_000).encode())
+        )
+    except InvalidFrame:
+        return
+    assert isinstance(message, list)
 
 
 def test_encoding_refuses_values_json_cannot_carry():
