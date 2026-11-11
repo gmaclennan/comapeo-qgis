@@ -7,13 +7,21 @@ import shutil
 import tempfile
 
 import pytest
-from qgis.core import QgsProject
+from qgis.core import QgsBrowserModel, QgsProject
+from qgis.PyQt.QtCore import QModelIndex
 from qgis.PyQt.QtWidgets import QMessageBox
 
 from comapeo_qgis.plugin import CoMapeoPlugin
 from tests.fake_server import FakeProject, FakeServer, observation, track
-from tests.qgis.conftest import cache_root, use_discovery, wait_until
+from tests.qgis.conftest import (
+    cache_root,
+    process_events,
+    pump,
+    use_discovery,
+    wait_until,
+)
 from tests.qgis.helpers import comapeo_map_layers, rows
+from tests.qgis.test_browser_model import child_index
 
 DAMAGED = b"this is not a GeoPackage\n" * 200
 
@@ -76,7 +84,7 @@ def moved_aside() -> list[str]:
 
 
 def test_a_damaged_cache_is_rebuilt_when_connected_keeping_layers_and_style(
-    iface, fake, folder
+    iface, fake, folder, monkeypatch
 ):
     project_file, cache, styling = save_project_with_layers(iface, fake, folder)
     damage(cache)
@@ -100,6 +108,16 @@ def test_a_damaged_cache_is_rebuilt_when_connected_keeping_layers_and_style(
             assert f.read() == DAMAGED
         wait_until(lambda: not plugin.controller.project_status("p1").busy)
         assert plugin.controller.project_status("p1").error is None
+
+        monkeypatch.setattr(
+            QMessageBox,
+            "question",
+            lambda *args, **kwargs: QMessageBox.StandardButton.Yes,
+        )
+        plugin.dock.projects.topLevelItem(0).setSelected(True)
+        plugin.dock.remove_button.click()
+        assert not os.path.exists(cache)
+        assert moved_aside() == []
     finally:
         plugin.unload()
 
@@ -130,6 +148,25 @@ def test_a_damaged_cache_offline_names_the_way_out(iface, fake, folder, monkeypa
             "question",
             lambda *args, **kwargs: QMessageBox.StandardButton.Yes,
         )
+
+        model = QgsBrowserModel()
+        model.initialize()
+        try:
+            root = child_index(model, QModelIndex(), "CoMapeo")
+            offline = child_index(model, root, "Cached projects (offline)")
+            project = child_index(model, offline, "Fake project")
+            if model.canFetchMore(project):
+                model.fetchMore(project)
+            pump(100)
+            shown = [
+                model.data(model.index(row, 0, project))
+                for row in range(model.rowCount(project))
+            ]
+            assert not any("GPKG" in str(t) or "OGR" in str(t) for t in shown), shown
+        finally:
+            model.deleteLater()
+            process_events()
+
         plugin.dock.remove_button.click()
         assert comapeo_map_layers() == []
         assert not os.path.exists(cache)

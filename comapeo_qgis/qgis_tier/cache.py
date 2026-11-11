@@ -292,9 +292,12 @@ class ProjectCache:
         self._meta = None
 
     def remove(self) -> None:
+        """Delete the cache with its side files and any damaged copies set aside."""
         self.close()
         for suffix in ("", "-wal", "-shm", "-journal"):
             Path(f"{self.path}{suffix}").unlink(missing_ok=True)
+        for aside in self.path.parent.glob(f"{self.path.name}.damaged-*"):
+            aside.unlink(missing_ok=True)
 
     # Metadata
 
@@ -704,18 +707,19 @@ def project_in_file(path: Path) -> Project | None:
 
 def _unreadable(path: Path) -> bool:
     """Whether SQLite reports the file as no database, a malformed one or one
-    without our metadata. A lock or a permission problem is not damage."""
+    without our metadata; a lock, a permission or a disk problem is not damage."""
     try:
         conn = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)
     except sqlite3.Error:
         return False
     try:
         conn.execute("SELECT key, value FROM comapeo_meta LIMIT 1").fetchall()
-    except sqlite3.OperationalError as err:
+    except sqlite3.DatabaseError as err:
         text = str(err).lower()
-        return not any(word in text for word in ("locked", "busy", "unable to open"))
-    except sqlite3.DatabaseError:
-        return True
+        return any(
+            words in text
+            for words in ("not a database", "malformed", "no such table: comapeo_meta")
+        )
     finally:
         conn.close()
     return False
