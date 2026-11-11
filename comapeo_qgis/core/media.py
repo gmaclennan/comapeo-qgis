@@ -1,0 +1,159 @@
+"""On-disk cache of attachment files, keyed by attachment key, never by URL."""
+
+from __future__ import annotations
+
+import hashlib
+import os
+import shutil
+import tempfile
+import time
+from dataclasses import dataclass
+from enum import Enum
+from pathlib import Path
+
+from .model import MEDIA_VARIANTS, Attachment
+
+# Names come from any member's device and the OS opens files by extension.
+_EXTENSIONS = {
+    "photo": (".jpg", (".jpg", ".jpeg", ".png", ".webp", ".heic", ".heif")),
+    "audio": (".m4a", (".m4a", ".mp3", ".aac", ".wav", ".ogg", ".opus")),
+    "video": (".mp4", (".mp4", ".mov", ".m4v", ".webm")),
+}
+UNKNOWN_TYPE_EXTENSION = ".bin"
+_PARTIAL_PREFIX = ".part-"
+
+
+class MediaState(Enum):
+    CACHED = "cached"
+    NOT_FETCHED = "not_fetched"
+    NOT_SYNCED = "not_synced"
+    UNAVAILABLE = "unavailable"
+
+
+@dataclass(frozen=True)
+class MediaEntry:
+    state: MediaState
+    path: Path
+    url: str | None
+
+
+class FetchOutcome(Enum):
+    OK = "ok"
+    NOT_SYNCED = "not_synced"
+    ERROR = "error"
+
+
+def classify_status(status: int) -> FetchOutcome:
+    """A 404 from the media server means the file has not synced here yet.
+
+    Only 200 is a complete file; a 206 partial body must not be cached as one.
+    """
+    if status == 200:
+        return FetchOutcome.OK
+    if status == 404:
+        return FetchOutcome.NOT_SYNCED
+    return FetchOutcome.ERROR
+
+
+def _digest(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8", "surrogatepass")).hexdigest()[:32]
+
+
+def file_extension(attachment: Attachment) -> str:
+    known = _EXTENSIONS.get(attachment.type)
+    if known is None:
+        return UNKNOWN_TYPE_EXTENSION
+    default, allowed = known
+    suffix = Path(attachment.name or "").suffix.lower()
+    return suffix if suffix in allowed else default
+
+
+class MediaCache:
+    def __init__(self, root: str | os.PathLike[str]) -> None:
+        self.root = Path(root)
+        self._not_synced: set[tuple[str, str, str]] = set()
+
+    def project_dir(self, project_id: str) -> Path:
+        return self.root / _digest(project_id)
+
+    def path_for(self, project_id: str, attachment: Attachment, variant: str) -> Path:
+        if variant not in MEDIA_VARIANTS:
+            raise ValueError(f"unknown media variant {variant!r}")
+        name = variant + file_extension(attachment)
+        return self.project_dir(project_id) / _digest(attachment.key) / name
+
+    def lookup(
+        self, project_id: str, attachment: Attachment, variant: str
+    ) -> MediaEntry:
+        path = self.path_for(project_id, attachment, variant)
+        url = attachment.urls.get(variant)
+        if path.is_file():
+            return MediaEntry(MediaState.CACHED, path, url)
+        if (project_id, attachment.key, variant) in self._not_synced:
+            return MediaEntry(MediaState.NOT_SYNCED, path, url)
+        if url is None:
+            return MediaEntry(MediaState.UNAVAILABLE, path, None)
+        return MediaEntry(MediaState.NOT_FETCHED, path, url)
+
+    def record_fetch(
+        self,
+        project_id: str,
+        attachment: Attachment,
+        variant: str,
+        status: int,
+        data: bytes | None = None,
+    ) -> MediaEntry:
+        """Record an HTTP result; stores `data` on success.
+
+        An empty 200 body is treated as a failed fetch, not cached.
+        """
+        outcome = classify_status(status)
+        cache_key = (project_id, attachment.key, variant)
+        if outcome is FetchOutcome.OK and data:
+            self._not_synced.discard(cache_key)
+            self.store(project_id, attachment, variant, data)
+        elif outcome is FetchOutcome.NOT_SYNCED:
+            self._not_synced.add(cache_key)
+        return self.lookup(project_id, attachment, variant)
+
+    def store(
+        self, project_id: str, attachment: Attachment, variant: str, data: bytes
+    ) -> Path:
+        path = self.path_for(project_id, attachment, variant)
+        # mkdir(parents=True) ignores `mode` for the parents it creates.
+        self.root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        for folder in (path.parent.parent, path.parent):
+            folder.mkdir(mode=0o700, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=_PARTIAL_PREFIX)
+        try:
+            with os.fdopen(fd, "wb") as f:
+                f.write(data)
+            os.replace(tmp, path)
+        except BaseException:
+            Path(tmp).unlink(missing_ok=True)
+            raise
+        return path
+
+    def retry_not_synced(self) -> None:
+        """Forget 404s so the next lookup fetches again (call on refresh)."""
+        self._not_synced.clear()
+
+    def remove_partial_files(self, older_than: float = 3600.0) -> int:
+        """Delete files left by writes that never finished; call on startup.
+
+        Recent ones are kept because another QGIS may be writing them now.
+        """
+        cutoff = time.time() - older_than
+        removed = 0
+        for path in self.root.glob(f"*/*/{_PARTIAL_PREFIX}*"):
+            try:
+                if path.stat().st_mtime < cutoff:
+                    path.unlink()
+                    removed += 1
+            except OSError:
+                continue
+        return removed
+
+    def remove_project(self, project_id: str) -> None:
+        shutil.rmtree(self.project_dir(project_id), ignore_errors=True)
+        self._not_synced = {k for k in self._not_synced if k[0] != project_id}

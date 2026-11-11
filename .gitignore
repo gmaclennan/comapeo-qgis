@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+.venv/
+.qgis-pytest/
+.pytest_cache/
+.ruff_cache/
+dist/
+build/
+*.zip
+.DS_Store
+Thumbs.db
+docs/evidence/
+docs/STATUS.md
