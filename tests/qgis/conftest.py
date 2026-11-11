@@ -12,8 +12,13 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from qgis.core import QgsApplication, QgsLayerTreeModel, QgsProject, QgsSettings
-from qgis.gui import QgsLayerTreeView, QgsMapCanvas
+from qgis.core import (
+    QgsApplication,
+    QgsLayerTreeModel,
+    QgsProject,
+    QgsSettings,
+)
+from qgis.gui import QgsGui, QgsLayerTreeView, QgsMapCanvas, QgsMessageBar
 from qgis.PyQt.QtCore import QEventLoop, QObject, Qt, QTimer, QUrl, pyqtSlot
 from qgis.PyQt.QtGui import QDesktopServices
 from qgis.PyQt.QtWidgets import (
@@ -115,6 +120,7 @@ class TestIface:
         self.toolbar = QToolBar("Plugins", self.window)
         self.window.addToolBar(self.toolbar)
         self.plugin_menu = self.window.menuBar().addMenu("Plugins")
+        self.bar = QgsMessageBar(self.window)
         self.menus: dict[str, QMenu] = {}
         self.layer_actions: dict[Any, tuple[Any, bool, list[str]]] = {}
         self.active_layer = None
@@ -124,6 +130,12 @@ class TestIface:
 
     def mapCanvas(self) -> QgsMapCanvas:
         return self.canvas
+
+    def messageBar(self) -> QgsMessageBar:
+        return self.bar
+
+    def bar_texts(self) -> list[str]:
+        return [item.text() for item in self.bar.items()]
 
     def layerTreeView(self) -> QgsLayerTreeView:
         return self.view
@@ -220,6 +232,26 @@ def clean_state() -> Iterator[None]:
 
 def use_discovery(path: str) -> None:
     QgsSettings().setValue(DISCOVERY_SETTING, path)
+
+
+_EDITORS: list[bool] = []
+
+
+@pytest.fixture
+def editor_widgets() -> None:
+    """QGIS registers its attribute editors at start-up; a headless app does not."""
+    if not _EDITORS:
+        QgsGui.editorWidgetRegistry().initEditors()
+        _EDITORS.append(True)
+
+
+def record_messages(controller: Any) -> list[str]:
+    """What the plugin shows the user, each message with its details."""
+    seen: list[str] = []
+    controller.messageShown.connect(
+        lambda _level, text, details: seen.append(f"{text}\n{details}")
+    )
+    return seen
 
 
 def server_or_skip(**kwargs: Any) -> dev.DevServer:

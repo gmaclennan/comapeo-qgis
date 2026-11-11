@@ -37,7 +37,11 @@ class CoMapeoPlugin:
     def initGui(self) -> None:
         window = self.iface.mainWindow()
         parent = window if isinstance(window, QWidget) else None
-        self.controller = Controller(client_version=plugin_version())
+        self.controller = Controller(
+            client_version=plugin_version(),
+            notify=self._show_message,
+            dialog_parent=self.iface.mainWindow,
+        )
 
         self.dock = CoMapeoDock(self.controller, parent)
         self.iface.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.dock)
@@ -111,6 +115,19 @@ class CoMapeoPlugin:
             self.dock = None
         self.controller.deleteLater()
         self.controller = None
+
+    def _show_message(self, level: Any, text: str, details: str) -> None:
+        bar = getattr(self.iface, "messageBar", None)
+        bar = bar() if callable(bar) else None
+        if bar is None:
+            return
+        seconds = (
+            6 if level in (Qgis.MessageLevel.Success, Qgis.MessageLevel.Info) else 0
+        )
+        if details:
+            bar.pushMessage("CoMapeo", text, details, level, seconds)
+        else:
+            bar.pushMessage("CoMapeo", text, level, seconds)
 
     def _on_layers_added(self, layers: list[QgsMapLayer]) -> None:
         if self._layer_action is None:

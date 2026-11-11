@@ -14,12 +14,15 @@ from qgis.core import (
     QgsApplication,
     QgsFeatureRequest,
     QgsMapLayer,
+    QgsMessageLog,
     QgsProject,
     QgsSettings,
     QgsVectorLayer,
 )
 from qgis.PyQt.QtCore import QCoreApplication, QEvent, QObject, QTimer, pyqtSignal
+from qgis.PyQt.QtWidgets import QWidget
 
+from ..core.editing import PAUSED_TEXT, read_only_message
 from ..core.media import MediaCache
 from ..core.model import (
     GEOMETRY_LINESTRING,
@@ -31,7 +34,7 @@ from ..core.model import (
     parse_layers,
     parse_projects,
 )
-from ..core.reconcile import layer_schema_key
+from ..core.reconcile import categories_digest, layer_schema_key
 from .cache import (
     CacheError,
     CacheLocked,
@@ -44,6 +47,7 @@ from .cache import (
     table_from_source,
 )
 from .connection import POLL_INTERVAL_MS, Connector, ServerState, ServerStatus
+from .editing import EditHook
 from .layers import (
     GROUP_PROP_PROJECT,
     PROP_LAYER,
@@ -62,6 +66,16 @@ from .style import (
 )
 from .sync import ProjectSync
 from .transport import LocalApiClient
+
+CONNECTING_TEXT = "Still connecting to CoMapeo Desktop."
+DOWNLOADING_TEXT = (
+    "This layer can be edited once it has finished downloading from CoMapeo Desktop."
+)
+TRANSACTION_TEXT = (
+    "CoMapeo layers cannot be edited while the project uses transaction groups."
+)
+
+Notify = Callable[[Any, str, str], None]
 
 SETTING_DISCOVERY = "comapeo/discoveryPath"
 SETTING_EXTRA_DISCOVERY = "comapeo/extraDiscoveryPaths"
@@ -87,6 +101,8 @@ class ProjectStatus:
     damaged: bool = False
     # Another program holds a lock on the cache file, so its details are unknown.
     locked: bool = False
+    # Titles of the layers whose live updates wait for an edit session.
+    paused_layers: tuple[str, ...] = ()
 
     @property
     def incomplete(self) -> bool:
@@ -131,6 +147,10 @@ class ProjectStatus:
             return f"Not connected. {self._cached()}"
         if self.error:
             return self.error
+        if self.paused_layers:
+            if len(self.paused_layers) == 1:
+                return PAUSED_TEXT.replace("this layer", self.paused_layers[0])
+            return "Live updates are paused for layers with unsaved edits."
         if self.busy:
             return "Updating…"
         return f"Up to date (last updated {when})."
@@ -165,6 +185,7 @@ class Controller(QObject):
     a CoMapeo layer changes. `mediaRetry` fires when media that was not yet
     synced or failed should be fetched again (Refresh, or an app connecting).
     `mediaRemoving(project_id)` fires before a project's media files are deleted.
+    `messageShown(level, text, details)` carries every message for the user.
     """
 
     changed = pyqtSignal()
@@ -172,6 +193,7 @@ class Controller(QObject):
     mediaRetry = pyqtSignal()
     mediaRemoving = pyqtSignal(str)
     downloadsChanged = pyqtSignal()
+    messageShown = pyqtSignal(object, str, str)
 
     def __init__(
         self,
@@ -182,10 +204,17 @@ class Controller(QObject):
         discovery_extra: Callable[[], list[str]] | None = None,
         lang: Callable[[], str | None] = default_lang,
         client_version: str = "0.1.0",
+        notify: Notify | None = None,
+        dialog_parent: Callable[[], QWidget | None] | None = None,
         parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)
         self.project = project or QgsProject.instance()
+        self._notify = notify
+        self._dialog_parent = dialog_parent
+        self._hooks: dict[str, EditHook] = {}
+        self._edit_keys: dict[str, Any] = {}
+        self._live: dict[str, tuple[Any, dict[str, LayerDefinition]]] = {}
         self.cache_root = Path(cache_root) if cache_root else default_cache_root()
         self._lang = lang
         self.connector = Connector(
@@ -254,6 +283,18 @@ class Controller(QObject):
         for layer in list(self._watched.values()):
             with contextlib.suppress(TypeError, RuntimeError):
                 layer.selectionChanged.disconnect(self._on_selection)
+        for layer_id, hook in list(self._hooks.items()):
+            hook.detach()
+            layer = self._watched.get(layer_id)
+            # Without the plugin QGIS would write the edits to the cache itself.
+            with contextlib.suppress(RuntimeError):
+                if layer is not None and layer.isEditable():
+                    layer.rollBack()
+                if layer is not None:
+                    layer.setReadOnly(True)
+            hook.deleteLater()
+        self._hooks.clear()
+        self._edit_keys.clear()
         self._watched.clear()
         for sync in self._syncs.values():
             sync.close()
@@ -374,6 +415,11 @@ class Controller(QObject):
             complete_refresh=min(stamps) if stamps else None,
             damaged=damaged,
             locked=self.cache(project_id).locked,
+            paused_layers=tuple(
+                info.definition.title or info.layer_id
+                for info in tables
+                if sync is not None and sync.held(info.layer_id)
+            ),
         )
 
     def cache(self, project_id: str) -> ProjectCache:
@@ -404,6 +450,108 @@ class Controller(QObject):
         build_type = self._served.get(project_id)
         client = self.connector.client(build_type) if build_type else None
         return client if client is not None and client.is_ready else None
+
+    def client_for(self, project_id: str) -> LocalApiClient | None:
+        return self.media_client(project_id)
+
+    def sync_for(self, project_id: str) -> ProjectSync | None:
+        return self._syncs.get(project_id)
+
+    def resolved_ids(self, layer: QgsMapLayer) -> tuple[str, str] | None:
+        return self._resolved_ids(layer)
+
+    def lang(self) -> str | None:
+        return self._lang()
+
+    def dialog_parent(self) -> QWidget | None:
+        return self._dialog_parent() if self._dialog_parent else None
+
+    def notify(self, level: Any, text: str, details: str = "") -> None:
+        """A message for the user: logged, and shown by the plugin if it can."""
+        QgsMessageLog.logMessage(
+            f"{text}\n{details}" if details else text, "CoMapeo", level
+        )
+        if self._notify is not None:
+            self._notify(level, text, details)
+        self.messageShown.emit(level, text, details)
+
+    # Editing
+
+    def live_definition(self, project_id: str, layer_id: str) -> LayerDefinition | None:
+        """The layer as the connected app last described it; None until it has."""
+        catalog = self._catalog.get(project_id)
+        if catalog is None:
+            return None
+        known = self._live.get(project_id)
+        if known is None or known[0] is not catalog[0]:
+            parsed = {d.layer_id: d for d in parse_layers(catalog[0])}
+            known = (catalog[0], parsed)
+            self._live[project_id] = known
+        return known[1].get(layer_id)
+
+    def edit_state(
+        self, layer: QgsMapLayer
+    ) -> tuple[bool, str | None, LayerDefinition | None]:
+        """Whether the plugin lets this map layer be edited now, why not, and the
+        layer as the connected app describes it."""
+        ids = self._resolved_ids(layer)
+        if ids is None:
+            return False, None, None
+        project_id, layer_id = ids
+        sync = self._syncs.get(project_id)
+        if sync is None or not sync.connected or self.client_for(project_id) is None:
+            return False, read_only_message(None), None
+        live = self.live_definition(project_id, layer_id)
+        if live is None:
+            return False, CONNECTING_TEXT, None
+        if live.editable is not True:
+            return False, read_only_message(live), live
+        cache = self.cache(project_id)
+        info = cache.table(layer_id) if cache.exists else None
+        if info is None or not info.editable_format or not info.last_refresh:
+            return False, DOWNLOADING_TEXT, live
+        if self.project.transactionMode() != Qgis.TransactionMode.Disabled:
+            return False, TRANSACTION_TEXT, live
+        return True, None, live
+
+    def update_editing(self, layer: QgsVectorLayer, force: bool = False) -> None:
+        """Lock or unlock the layer and its columns for the current state."""
+        ids = self._resolved_ids(layer)
+        if ids is None:
+            return
+        project_id, layer_id = ids
+        cache = self.cache(project_id)
+        info = cache.table(layer_id) if cache.exists else None
+        if info is None:
+            return
+        allowed, message, live = self.edit_state(layer)
+        categories = cache.categories() if allowed else []
+        key = (
+            allowed,
+            info.table,
+            repr(live) if allowed else None,
+            categories_digest(categories) if allowed else None,
+        )
+        if layer.isEditable():
+            hook = self._hooks.get(layer.id())
+            if hook is not None and not allowed:
+                hook.editing_lost(message)
+            return
+        if not force and self._edit_keys.get(layer.id()) == key:
+            return
+        self._edit_keys[layer.id()] = key
+        configure(layer, project_id, info, live if allowed else None, categories)
+
+    def _refresh_editing(self, project_id: str) -> None:
+        for layer in self._layers_of(project_id):
+            self.update_editing(layer)
+        for layer_id, hook in self._hooks.items():
+            if hook.project_id == project_id and layer_id in self._watched:
+                hook.check_unconfirmed()
+
+    def _set_catalog(self, project_id: str, layers: Any, categories: Any) -> None:
+        self._catalog[project_id] = (layers, categories)
+        self._refresh_editing(project_id)
 
     def cached_attachments(
         self, project_id: str, layer_id: str, doc_id: str
@@ -712,7 +860,7 @@ class Controller(QObject):
                     return
                 replies[name] = result
                 if len(replies) == 2:
-                    self._catalog[project_id] = (replies["layers"], replies["cats"])
+                    self._set_catalog(project_id, replies["layers"], replies["cats"])
                     self.changed.emit()
 
             return callback
@@ -731,6 +879,7 @@ class Controller(QObject):
             sync = self._syncs.get(project_id)
             if sync is not None:
                 sync.detach()
+            self._refresh_editing(project_id)
         self.changed.emit()
 
     def _on_notification(self, method: str, params: Any) -> None:
@@ -759,11 +908,10 @@ class Controller(QObject):
                 lambda p=project_id: self._on_categories_changed(p)
             )
             sync.schemaLoaded.connect(
-                lambda layers, cats, p=project_id: self._catalog.__setitem__(
-                    p, (layers, cats)
-                )
+                lambda layers, cats, p=project_id: self._set_catalog(p, layers, cats)
             )
             sync.statusChanged.connect(self.changed)
+            sync.statusChanged.connect(lambda p=project_id: self._refresh_editing(p))
             sync.projectGone.connect(lambda p=project_id: self._on_gone(p))
             self._syncs[project_id] = sync
         if client is not None and not sync.connected:
@@ -786,7 +934,8 @@ class Controller(QObject):
             project_id = self._adopt(layer)
             if project_id is not None:
                 touched.add(project_id)
-                self._watch(layer)
+                self._watch(layer, project_id)
+                self.update_editing(layer, force=True)
         for project_id in touched:
             self._activate(project_id)
 
@@ -845,6 +994,10 @@ class Controller(QObject):
         for layer_id in list(self._watched):
             if self.project.mapLayer(layer_id) is None:
                 del self._watched[layer_id]
+                hook = self._hooks.pop(layer_id, None)
+                if hook is not None:
+                    hook.detach()
+                self._edit_keys.pop(layer_id, None)
         active = set(self.active_projects())
         for project_id in list(self._syncs):
             if project_id not in active:
@@ -857,11 +1010,12 @@ class Controller(QObject):
         self._on_layers_added(list(self.project.mapLayers().values()))
         self.changed.emit()
 
-    def _watch(self, layer: QgsVectorLayer) -> None:
+    def _watch(self, layer: QgsVectorLayer, project_id: str) -> None:
         if layer.id() in self._watched:
             return
         self._watched[layer.id()] = layer
         layer.selectionChanged.connect(self._on_selection)
+        self._hooks[layer.id()] = EditHook(layer, self, project_id)
 
     def _on_selection(self, *_args: Any) -> None:
         layer = self.sender()
@@ -937,6 +1091,7 @@ class Controller(QObject):
             point_at(layer, cache, info)
             follow_category_field(layer, old_category_field, info)
             append_new_categories(layer, info, cache.categories())
+            self.update_editing(layer, force=True)
             layer.triggerRepaint()
 
     def _on_categories_changed(self, project_id: str) -> None:
@@ -947,6 +1102,7 @@ class Controller(QObject):
             info = cache.table(ids[1]) if ids else None
             if info is not None:
                 append_new_categories(layer, info, categories)
+                self.update_editing(layer)
 
     def _resolved_ids(
         self, layer: QgsMapLayer, replaced: dict[str, str] | None = None

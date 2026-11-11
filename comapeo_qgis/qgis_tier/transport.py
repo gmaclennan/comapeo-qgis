@@ -111,6 +111,29 @@ class LocalApiClient(QObject):
     def close(self) -> None:
         self._dispatch(self._conn.close())
 
+    def wait(self, done: Callable[[], bool], timeout: float) -> bool:
+        """Block on this socket until `done()` is true; False after `timeout`.
+
+        No event loop runs, so nothing else in QGIS moves meanwhile; replies,
+        notifications and request deadlines on this connection are handled."""
+        deadline = time.monotonic() + timeout
+        connected = QLocalSocket.LocalSocketState.ConnectedState
+        while not done():
+            remaining = deadline - time.monotonic()
+            if self._closed or remaining <= 0:
+                return done()
+            slice_ms = max(1, min(100, int(remaining * 1000)))
+            if self._socket.bytesToWrite() > 0:
+                self._socket.waitForBytesWritten(slice_ms)
+            if self._socket.bytesAvailable() == 0:
+                self._socket.waitForReadyRead(slice_ms)
+            if self._socket.bytesAvailable() > 0:
+                self._on_ready_read()
+            self._dispatch(self._conn.tick())
+            if not self._closed and self._socket.state() != connected:
+                self._on_disconnected()
+        return True
+
     def _on_connected(self) -> None:
         try:
             self._conn.start()
@@ -129,6 +152,9 @@ class LocalApiClient(QObject):
         self._dispatch(self._conn.connection_lost())
 
     def _on_error(self, error: Any) -> None:
+        # A wait that timed out; the connection is fine.
+        if error == QLocalSocket.LocalSocketError.SocketTimeoutError:
+            return
         # macOS and Linux report PeerClosedError before `disconnected`; Windows not.
         if error == QLocalSocket.LocalSocketError.PeerClosedError:
             self._on_disconnected()

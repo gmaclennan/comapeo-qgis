@@ -66,6 +66,7 @@ from ..core.model import (
     attachments_from_json,
     parse_categories,
     parse_layers,
+    revision,
 )
 from ..core.reconcile import SyncPlan
 from .qt_compat import meta_type, to_qdatetime
@@ -87,7 +88,11 @@ _PRIVATE = (
     ("version", "comapeo_version"),
     ("category_id", "comapeo_category_id"),
     ("attachments", "comapeo_attachments"),
+    ("forks", "comapeo_forks"),
+    ("editable", "comapeo_editable"),
 )
+# Tables cached by a plugin that predates editing lack these.
+_LATER_ROLES = {"forks", "editable"}
 
 
 def default_cache_root() -> Path:
@@ -137,13 +142,18 @@ class TableInfo:
         layers = parse_layers({"layers": [dict(self.raw_definition)]})
         if not layers or layers[0].layer_id != self.layer_id:
             raise ValueError(f"cached definition of {self.layer_id!r} is unreadable")
-        missing = {r for r, _ in _PRIVATE} - set(self.private)
+        missing = {r for r, _ in _PRIVATE} - _LATER_ROLES - set(self.private)
         if missing:
             raise ValueError(f"cached table of {self.layer_id!r} lacks {missing}")
         object.__setattr__(self, "definition", layers[0])
 
     def field(self, role: str) -> str:
         return self.private[role]
+
+    @property
+    def editable_format(self) -> bool:
+        """Whether the table has the private columns that editing needs."""
+        return set(self.private) >= _LATER_ROLES
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -238,6 +248,23 @@ def to_qgs_value(value: Any, column: ColumnSpec) -> Any:
     if column.kind == KIND_MAP and not isinstance(value, (dict, list)):
         return {"value": value}
     return value
+
+
+def _forks_from_json(text: Any) -> tuple[str, ...]:
+    if not isinstance(text, str):
+        return ()
+    try:
+        value = json.loads(text)
+    except ValueError:
+        return ()
+    if not isinstance(value, list):
+        return ()
+    return tuple(sorted({v for v in value if isinstance(v, str) and v}))
+
+
+def stored_forks(text: Any) -> tuple[str, ...]:
+    """The forks of a cached row, from its private forks column."""
+    return _forks_from_json(text)
 
 
 def _attachments_json(record: FeatureRecord) -> str:
@@ -602,8 +629,9 @@ class ProjectCache:
         fields = QgsFields()
         for column in layer.columns:
             fields.append(_qgs_field(column))
-        for role in ("doc_id", "version", "category_id", "attachments"):
+        for role in ("doc_id", "version", "category_id", "attachments", "forks"):
             fields.append(QgsField(private[role], meta_type("QString")))
+        fields.append(QgsField(private["editable"], meta_type("Bool")))
         self._layers.pop(table, None)
         self._create_table(
             table,
@@ -654,13 +682,18 @@ class ProjectCache:
         connection = metadata.createConnection(str(self.path), {})
         return [t.tableName() for t in connection.tables()]
 
-    def versions(self, info: TableInfo) -> dict[str, str]:
-        """Raises CacheLocked while another program holds the file."""
+    def revisions(
+        self, info: TableInfo, ids: Iterable[str] | None = None
+    ) -> dict[str, str]:
+        """Document id to `model.revision` of each stored row, or of those in `ids`.
+
+        Raises CacheLocked while another program holds the file."""
         if not self.exists:
             return {}
-        id_field, version_field = info.field("doc_id"), info.field("version")
-        names = ", ".join(_quoted(n) for n in (id_field, version_field))
+        roles = ["doc_id", "version"] + (["forks"] if info.editable_format else [])
+        names = ", ".join(_quoted(info.field(r)) for r in roles)
         query = f"SELECT {names} FROM {_quoted(info.table)}"  # noqa: S608 - quoted
+        wanted = None if ids is None else set(ids)
         try:
             with _reading(self.path) as conn:
                 found = conn.execute(query).fetchall()
@@ -668,11 +701,16 @@ class ProjectCache:
             raise
         except sqlite3.Error:
             return {}
-        return {
-            doc_id: version
-            for doc_id, version in found
-            if isinstance(doc_id, str) and isinstance(version, str)
-        }
+        result = {}
+        for row in found:
+            doc_id, version = row[0], row[1]
+            if not isinstance(doc_id, str) or not isinstance(version, str):
+                continue
+            if wanted is not None and doc_id not in wanted:
+                continue
+            forks = _forks_from_json(row[2]) if len(row) > 2 else ()
+            result[doc_id] = revision(version, forks)
+        return result
 
     def attachments(
         self, info: TableInfo, doc_id: str
@@ -759,12 +797,15 @@ class ProjectCache:
             index = fields.indexOf(column.name)
             if index >= 0:
                 values[index] = to_qgs_value(record.attributes.get(column.name), column)
-        private = {
+        private: dict[str, Any] = {
             "doc_id": record.id,
             "version": record.version,
             "category_id": record.category_id,
             "attachments": _attachments_json(record),
         }
+        if info.editable_format:
+            private["forks"] = json.dumps(list(record.forks))
+            private["editable"] = record.editable
         for role, value in private.items():
             values[fields.indexOf(info.field(role))] = value
         return values
