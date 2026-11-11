@@ -15,7 +15,7 @@ from qgis.PyQt.QtCore import QTimer
 from comapeo_qgis.plugin import CoMapeoPlugin
 from comapeo_qgis.qgis_tier import controller as controller_module
 from tests.fake_server import FakeProject, FakeServer, observation, track
-from tests.qgis.conftest import pump, wait_until
+from tests.qgis.conftest import pump, use_discovery, wait_until
 from tests.qgis.helpers import comapeo_map_layers, held_lock, rows
 from tests.qgis.test_damaged_cache import moved_aside, save_project_with_layers
 
@@ -178,7 +178,7 @@ def test_selecting_a_feature_offline_while_another_program_locks_the_cache(
         plugin.unload()
 
 
-def test_a_locked_cache_with_the_app_connected_is_updated_on_refresh(
+def test_a_locked_cache_with_the_app_connected_is_updated_once_free(
     iface, fake, folder
 ):
     project_file, cache, _styling = save_project_with_layers(iface, fake, folder)
@@ -201,17 +201,51 @@ def test_a_locked_cache_with_the_app_connected_is_updated_on_refresh(
                 lambda: "another program" in panel_text(plugin).lower(),
                 message="the lock reported",
             )
+            fake.projects["p1"].features["observations"].append(observation("d"))
+            changed = {"projectId": "p1", "layerId": "observations", "ids": ["d"]}
+            fake.notify("layer.changed", changed)
             pump(500)
             longest = stalls.stop()
             assert init_gui < MARGIN, init_gui
             assert slots.total < MARGIN, slots.total
             assert longest < MARGIN, longest
         [observations] = comapeo_map_layers("observations")
-        assert set(rows(observations)) == {"a", "b"}
-        plugin.dock.refresh_button.click()
-        wait_until(lambda: set(rows(observations)) == {"a", "b", "c"})
+        wait_until(lambda: set(rows(observations)) == {"a", "b", "c", "d"})
         wait_until(lambda: panel_text(plugin).startswith("Up to date"))
         assert moved_aside() == []
     finally:
         slots.disconnect()
+        plugin.unload()
+
+
+def test_a_live_update_that_meets_another_writer_arrives_once_it_is_done(iface, fake):
+    use_discovery(fake.write_discovery())
+    plugin = CoMapeoPlugin(iface)
+    try:
+        plugin.initGui()
+        controller = plugin.controller
+        wait_until(lambda: controller.available_layers("p1"))
+        observations, _tracks = controller.add_project("p1")
+        wait_until(lambda: set(rows(observations)) == {"a", "b"})
+        wait_until(lambda: panel_text(plugin).startswith("Up to date"))
+        cache = str(controller.cache("p1").path)
+        # Readers are not kept out in write-ahead-log mode; only writers are.
+        assert journal_mode(cache) == "wal"
+        observations_now = fake.projects["p1"].features["observations"]
+        with held_lock(cache):
+            observations_now.append(observation("c"))
+            changed = {"projectId": "p1", "layerId": "observations", "ids": ["c"]}
+            fake.notify("layer.changed", changed)
+            wait_until(
+                lambda: "another program" in panel_text(plugin).lower(),
+                message="the lock reported",
+            )
+        wait_until(lambda: set(rows(observations)) == {"a", "b", "c"})
+        wait_until(lambda: panel_text(plugin).startswith("Up to date"))
+        observations_now.append(observation("e"))
+        changed = {"projectId": "p1", "layerId": "observations", "ids": ["e"]}
+        fake.notify("layer.changed", changed)
+        wait_until(lambda: set(rows(observations)) == {"a", "b", "c", "e"})
+        assert panel_text(plugin).startswith("Up to date")
+    finally:
         plugin.unload()

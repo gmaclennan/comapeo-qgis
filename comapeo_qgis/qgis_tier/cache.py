@@ -77,7 +77,7 @@ FILE_SUFFIX = ".gpkg"
 WRITE_WAIT_S = 0.25
 LOCKED_MESSAGE = (
     "Another program is using the cached data, so it could not be updated. "
-    "Try Refresh later."
+    "The plugin tries again every few seconds."
 )
 
 _PRIVATE = (

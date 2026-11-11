@@ -350,6 +350,8 @@ class FakeServer:
             conn.close()
             with self._lock:
                 self.open_connections -= 1
+                if conn in self.connections:
+                    self.connections.remove(conn)
 
     def _handshake(self, conn: _Connection) -> bool:
         conn.sock.settimeout(self.handshake_timeout)
