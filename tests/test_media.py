@@ -9,8 +9,9 @@ from comapeo_qgis.core.media import (
     MediaCache,
     MediaState,
     classify_status,
+    is_media_url,
 )
-from comapeo_qgis.core.model import Attachment
+from comapeo_qgis.core.model import Attachment, attachments_from_json
 
 PHOTO = Attachment(
     type="photo",
@@ -191,3 +192,93 @@ def test_remove_project(tmp_path):
 )
 def test_classify_status(status, outcome):
     assert classify_status(status) is outcome
+
+
+@pytest.mark.parametrize(
+    ("attachment_type", "content_type", "expected"),
+    [
+        ("audio", "audio/wav", "original.wav"),
+        ("audio", "audio/x-wav", "original.wav"),
+        ("audio", "audio/mp4", "original.m4a"),
+        ("audio", "audio/mpeg", "original.mp3"),
+        ("photo", "image/jpeg", "original.jpg"),
+        ("photo", "IMAGE/PNG; charset=binary", "original.png"),
+        ("video", "video/quicktime", "original.mov"),
+        ("photo", "text/html", "original.jpg"),
+        ("photo", "application/x-msdownload", "original.jpg"),
+        ("photo", "audio/wav", "original.jpg"),
+        ("audio", "image/png", "original.m4a"),
+        ("audio", None, "original.m4a"),
+        ("document", "application/pdf", "original.bin"),
+    ],
+)
+def test_extension_follows_the_content_type_within_the_allow_list(
+    tmp_path, attachment_type, content_type, expected
+):
+    attachment = Attachment(attachment_type, "1f0e9d8c7b6a", "k", {})
+    cache = MediaCache(tmp_path)
+    path = cache.store("p", attachment, "original", b"data", content_type)
+    assert path.name == expected
+    assert cache.lookup("p", attachment, "original").path == path
+
+
+def test_content_type_wins_over_the_name(tmp_path):
+    attachment = Attachment("audio", "note.mp3", "k", {})
+    path = MediaCache(tmp_path).store("p", attachment, "original", b"x", "audio/wav")
+    assert path.name == "original.wav"
+
+
+def test_a_file_saved_under_another_extension_is_found_and_replaced(tmp_path):
+    cache = MediaCache(tmp_path)
+    wav = cache.store("p", AUDIO, "original", b"old", "audio/wav")
+    entry = MediaCache(tmp_path).lookup("p", AUDIO, "original")
+    assert entry.state is MediaState.CACHED and entry.path == wav
+    m4a = cache.store("p", AUDIO, "original", b"new", "audio/mp4")
+    assert m4a.name == "original.m4a" and not wav.exists()
+    assert cache.lookup("p", AUDIO, "original").path.read_bytes() == b"new"
+
+
+def test_streamed_download_commits_into_place(tmp_path):
+    cache = MediaCache(tmp_path)
+    cache.record_fetch("p", PHOTO, "original", 404)
+    partial = cache.partial_file("p", PHOTO, "original")
+    with open(partial, "ab") as f:
+        f.write(b"part one ")
+        f.write(b"part two")
+    assert cache.lookup("p", PHOTO, "original").state is MediaState.NOT_SYNCED
+    path = cache.commit(partial, "p", PHOTO, "original", "image/jpeg")
+    assert not partial.exists()
+    entry = cache.lookup("p", PHOTO, "original")
+    assert entry.state is MediaState.CACHED and entry.path == path
+    assert path.read_bytes() == b"part one part two"
+
+
+@pytest.mark.parametrize(
+    ("url", "ok"),
+    [
+        ("http://127.0.0.1:5001/blobs/a/b", True),
+        ("http://localhost:5001/x", True),
+        ("http://[::1]:5001/x", True),
+        ("https://127.0.0.1:5001/x", False),
+        ("http://example.org/x", False),
+        ("http://127.0.0.1.example.org/x", False),
+        ("file:///etc/passwd", False),
+        ("http://[::1/x", False),
+        ("", False),
+        (None, False),
+    ],
+)
+def test_only_loopback_http_urls_are_media_urls(url, ok):
+    assert is_media_url(url) is ok
+
+
+def test_attachments_read_back_from_the_cache_column():
+    text = (
+        '[{"type": "photo", "name": "a", "key": "k1", "urls": {"thumbnail": "u"}},'
+        ' {"type": "audio", "key": ""}, "junk", {"type": "audio", "key": "k2"}]'
+    )
+    found = attachments_from_json(text)
+    assert [a.key for a in found] == ["k1", "k2"]
+    assert found[0].urls == {"thumbnail": "u"}
+    assert attachments_from_json("not json") == ()
+    assert attachments_from_json(None) == ()
