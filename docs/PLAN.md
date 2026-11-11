@@ -94,6 +94,7 @@ Data handling:
 - Tracks: one line per track with start time, end time and category; per-point timestamps as the geometry's M value.
 - Media: thumbnails and preview-size images cached on demand; originals only on "open original" or "download all media"; no size limit in version 1. A 404 on a known attachment is shown as "not yet synced" and retried on refresh. Video opens in the system player. Audio plays in the panel if playback proves reliable, otherwise opens externally.
 - If a cached project is no longer available in CoMapeo, its layers are marked disconnected and the plugin offers to delete the cached data. It does not delete automatically. "Remove cached data" is always available.
+- A cache file that exists but cannot be read is renamed aside (`<file>.damaged-<time>`) and downloaded again once the app is connected; map layers and their styling stay and are pointed at the new tables. Offline, the project is listed with a message naming "Remove cached data".
 
 ## Testing
 

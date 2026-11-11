@@ -22,6 +22,7 @@ import json
 import math
 import os
 import re
+import sqlite3
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -250,10 +251,38 @@ class ProjectCache:
         self.path = cache_file(self.root, project_id)
         self._layers: dict[str, QgsVectorLayer] = {}
         self._meta: dict[str, Any] | None = None
+        self._checked: tuple[Any, bool] | None = None
 
     @property
     def exists(self) -> bool:
         return self.path.is_file()
+
+    def is_damaged(self) -> bool:
+        """The file exists but is not a readable cache. Remembered per file
+        version, as statuses ask often."""
+        try:
+            st = self.path.stat()
+        except OSError:
+            return False
+        version = (st.st_mtime_ns, st.st_size)
+        if self._checked is None or self._checked[0] != version:
+            self._checked = (version, _unreadable(self.path))
+        return self._checked[1]
+
+    def set_aside(self) -> Path:
+        """Rename the file (and SQLite's side files) out of the way, so a fresh
+        cache can be built; the old one is kept for anyone who wants to look."""
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        aside = self.path.with_name(f"{self.path.name}.damaged-{stamp}")
+        self.close()
+        os.replace(self.path, aside)
+        for suffix in ("-wal", "-shm", "-journal"):
+            side = Path(f"{self.path}{suffix}")
+            if side.exists():
+                with contextlib.suppress(OSError):
+                    os.replace(side, Path(f"{aside}{suffix}"))
+        self._checked = None
+        return aside
 
     def uri(self, table: str) -> str:
         return f"{self.path}|layername={table}"
@@ -671,6 +700,25 @@ def project_in_file(path: Path) -> Project | None:
             color if isinstance(color, str) else None,
         )
     return None
+
+
+def _unreadable(path: Path) -> bool:
+    """Whether SQLite reports the file as no database, a malformed one or one
+    without our metadata. A lock or a permission problem is not damage."""
+    try:
+        conn = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)
+    except sqlite3.Error:
+        return False
+    try:
+        conn.execute("SELECT key, value FROM comapeo_meta LIMIT 1").fetchall()
+    except sqlite3.OperationalError as err:
+        text = str(err).lower()
+        return not any(word in text for word in ("locked", "busy", "unable to open"))
+    except sqlite3.DatabaseError:
+        return True
+    finally:
+        conn.close()
+    return False
 
 
 def cached_files(root: Path) -> Iterable[Path]:
