@@ -6,7 +6,7 @@ from __future__ import annotations
 import contextlib
 
 from qgis.gui import QgsDockWidget
-from qgis.PyQt.QtCore import Qt
+from qgis.PyQt.QtCore import QRect, QSize, Qt
 from qgis.PyQt.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -15,6 +15,8 @@ from qgis.PyQt.QtWidgets import (
     QMessageBox,
     QProgressBar,
     QPushButton,
+    QStyledItemDelegate,
+    QStyleOptionViewItem,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
@@ -26,6 +28,23 @@ from .controller import Controller
 from .media_panel import MediaPanel
 
 _ROLE_PROJECT = Qt.ItemDataRole.UserRole
+
+
+class _WrappingDelegate(QStyledItemDelegate):
+    """QTreeView sizes rows without the column width, so wrapped text is cut off."""
+
+    def __init__(self, view: QTreeWidget) -> None:
+        super().__init__(view)
+        self.view = view
+
+    def sizeHint(self, option: QStyleOptionViewItem, index: object) -> QSize:
+        base = super().sizeHint(option, index)
+        opt = QStyleOptionViewItem(option)
+        self.initStyleOption(opt, index)
+        width = max(40, self.view.header().sectionSize(index.column()) - 12)
+        flags = int(Qt.TextFlag.TextWordWrap)
+        text = opt.fontMetrics.boundingRect(QRect(0, 0, width, 10000), flags, opt.text)
+        return QSize(base.width(), max(base.height(), text.height() + 8))
 
 
 class CoMapeoDock(QgsDockWidget):
@@ -49,8 +68,13 @@ class CoMapeoDock(QgsDockWidget):
         self.projects.setWordWrap(True)
         self.projects.setTextElideMode(Qt.TextElideMode.ElideNone)
         self.projects.header().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.projects.setItemDelegate(_WrappingDelegate(self.projects))
+        self.projects.header().sectionResized.connect(
+            lambda *_a: self.projects.scheduleDelayedItemsLayout()
+        )
+        self.projects.setMaximumHeight(160)
         self.projects.itemSelectionChanged.connect(self._update_buttons)
-        layout.addWidget(self.projects, 1)
+        layout.addWidget(self.projects)
         buttons = QHBoxLayout()
         self.refresh_button = QPushButton("Refresh", body)
         self.refresh_button.setObjectName("refreshButton")
@@ -89,7 +113,7 @@ class CoMapeoDock(QgsDockWidget):
         line.setFrameShape(QFrame.Shape.HLine)
         layout.addWidget(line)
         self.media_area = MediaPanel(controller, body)
-        layout.addWidget(self.media_area, 2)
+        layout.addWidget(self.media_area, 1)
         self.setWidget(body)
         controller.changed.connect(self.update_view)
         controller.downloadsChanged.connect(self._update_buttons)
