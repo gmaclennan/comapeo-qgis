@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from qgis.PyQt.QtCore import QSize, Qt, QUrl
+from qgis.PyQt.QtCore import QSize, Qt, QTimer, QUrl
 from qgis.PyQt.QtGui import QColor, QDesktopServices, QIcon, QPainter, QPixmap
 from qgis.PyQt.QtWidgets import (
     QHBoxLayout,
@@ -146,7 +146,6 @@ class MediaPanel(QWidget):
         self.photos.setMovement(QListWidget.Movement.Static)
         self.photos.setWrapping(True)
         self.photos.setWordWrap(True)
-        self.photos.setMaximumHeight(2 * (THUMBNAIL_SIZE + 30) + 8)
         self.photos.itemClicked.connect(self._on_photo_clicked)
         self.photos.itemActivated.connect(self._on_photo_clicked)
         layout.addWidget(self.photos)
@@ -154,7 +153,7 @@ class MediaPanel(QWidget):
         self.preview.setObjectName("photoPreview")
         self.preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.preview.setWordWrap(True)
-        layout.addWidget(self.preview, 1)
+        layout.addWidget(self.preview)
         self.open_original_button = QPushButton("Open original", self)
         self.open_original_button.setObjectName("openOriginalButton")
         self.open_original_button.clicked.connect(self._open_original)
@@ -165,12 +164,16 @@ class MediaPanel(QWidget):
         self.action_message.setObjectName("mediaActionMessage")
         self.action_message.setWordWrap(True)
         layout.addWidget(self.action_message)
+        layout.addStretch(1)
+        self._ticker = QTimer(self)
+        self._ticker.setInterval(250)
+        self._ticker.timeout.connect(self._update_audio_rows)
 
         controller.selectionChanged.connect(self.on_selection)
         controller.mediaRetry.connect(self.reload)
         controller.changed.connect(self._on_controller_changed)
         self.fetcher.fetched.connect(self._on_fetched)
-        self.player.stateChanged.connect(self._update_audio_rows)
+        self.player.stateChanged.connect(self._on_player_state)
         self.player.positionChanged.connect(lambda _p: self._update_audio_rows())
         self.player.durationChanged.connect(lambda _d: self._update_audio_rows())
         self.player.failed.connect(self._on_play_failed)
@@ -345,10 +348,26 @@ class MediaPanel(QWidget):
             self._paint_item(item, attachment)
             self.photos.addItem(item)
         self.photos.setVisible(bool(photos))
+        self._fit_photo_list()
+        QTimer.singleShot(0, self._fit_photo_list)
         if self._preview_key is not None and self._find(self._preview_key) is None:
             self._preview_key = None
         self._show_preview()
         self._rebuild_rows(audio, video)
+
+    def _fit_photo_list(self) -> None:
+        cell = self.photos.gridSize()
+        per_row = max(1, (self.photos.viewport().width() - 4) // cell.width())
+        rows = max(1, min(2, -(-self.photos.count() // per_row)))
+        self.photos.setFixedHeight(
+            rows * cell.height() + 2 * self.photos.frameWidth() + 4
+        )
+
+    def resizeEvent(self, event: Any) -> None:
+        super().resizeEvent(event)
+        self._fit_photo_list()
+        if self._preview_key is not None:
+            self._show_preview()
 
     def _paint_item(self, item: QListWidgetItem, attachment: Attachment) -> None:
         state = self._ensure(attachment, "thumbnail")
@@ -447,11 +466,12 @@ class MediaPanel(QWidget):
         self.open_original_button.show()
         pixmap = QPixmap(str(path)) if path is not None else QPixmap()
         if state == CACHED and not pixmap.isNull():
-            width = max(120, min(PREVIEW_MAX, self.width() - 16))
+            width = max(120, min(PREVIEW_MAX, self.preview.width() - 8))
+            height = min(PREVIEW_MAX, 360)
             self.preview.setPixmap(
                 pixmap.scaled(
                     width,
-                    width,
+                    height,
                     Qt.AspectRatioMode.KeepAspectRatio,
                     Qt.TransformationMode.SmoothTransformation,
                 )
@@ -507,6 +527,14 @@ class MediaPanel(QWidget):
         self._playing_key = key
         self.action_message.clear()
         self.player.play(path)
+
+    def _on_player_state(self, state: str) -> None:
+        # Some backends report the position rarely, so poll it while playing.
+        if state == PLAYING:
+            self._ticker.start()
+        else:
+            self._ticker.stop()
+        self._update_audio_rows()
 
     def _on_play_failed(self, message: str) -> None:
         self.action_message.setText(
