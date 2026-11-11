@@ -155,12 +155,14 @@ class Controller(QObject):
 
     `selectionChanged(project_id, layer_id, doc_ids)` fires when the selection on
     a CoMapeo layer changes. `mediaRetry` fires when media that was not yet
-    synced should be fetched again (Refresh, or an app connecting).
+    synced or failed should be fetched again (Refresh, or an app connecting).
+    `mediaRemoving(project_id)` fires before a project's media files are deleted.
     """
 
     changed = pyqtSignal()
     selectionChanged = pyqtSignal(str, str, list)
     mediaRetry = pyqtSignal()
+    mediaRemoving = pyqtSignal(str)
     downloadsChanged = pyqtSignal()
 
     def __init__(
@@ -517,10 +519,12 @@ class Controller(QObject):
         if sync is not None:
             sync.close()
             sync.deleteLater()
+        self.mediaRemoving.emit(project_id)
         download = self._downloads.get(project_id)
         if download is not None:
             download.cancel()
         self.fetcher.abort_project(project_id)
+        self.fetcher.clear_errors(project_id)
         self.media.remove_project(project_id)
         problem = None
         try:
