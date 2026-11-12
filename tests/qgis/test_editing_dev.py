@@ -19,7 +19,15 @@ from tests.qgis.conftest import (
     use_discovery,
     wait_until,
 )
-from tests.qgis.helpers import Oracle, grey_rows, plain, rows, table_view
+from tests.qgis.helpers import (
+    Oracle,
+    badges,
+    grey_rows,
+    panel_row,
+    plain,
+    rows,
+    table_view,
+)
 
 pytestmark = pytest.mark.real_server
 
@@ -305,8 +313,9 @@ def test_made_coordinator_can_change_others(plugin, oracle, server, iface):
         server.run("role member")
 
 
-def test_editing_off_leaves_the_layer_read_only(iface):
+def test_editing_off_leaves_the_layer_read_only_and_says_why(iface):
     dev = server_or_skip(observations=5, tracks=1, photos=0)
+    off = "Editing from QGIS is switched off in CoMapeo Desktop."
     try:
         use_discovery(dev.discovery_dir)
         plugin = CoMapeoPlugin(iface)
@@ -316,6 +325,7 @@ def test_editing_off_leaves_the_layer_read_only(iface):
             controller = plugin.controller
             wait_until(lambda: controller.available_layers(truth.project_id))
             layer = controller.add_layer(truth.project_id, "observations")
+            tracks = controller.add_layer(truth.project_id, "tracks")
             wait_until(lambda: set(rows(layer)) == set(truth.features("observations")))
             truth.close()
             wait_until(
@@ -326,7 +336,13 @@ def test_editing_off_leaves_the_layer_read_only(iface):
             assert not layer.startEditing()
             allowed, message, _ = controller.edit_state(layer)
             assert not allowed
-            assert message == "Editing from QGIS is switched off in CoMapeo Desktop."
+            assert message == off
+            # Toggle Editing is greyed out on a read-only layer, so the reason
+            # must show without trying to edit.
+            wait_until(lambda: badges(iface, layer) == [off], message="badge")
+            wait_until(lambda: off in panel_row(plugin, truth.project_id))
+            assert panel_row(plugin, truth.project_id).startswith("Up to date")
+            assert badges(iface, tracks) == ["Tracks cannot be edited from QGIS."]
         finally:
             plugin.unload()
     finally:

@@ -90,8 +90,8 @@ def test_a_server_that_predates_editing_has_no_editable_member():
     assert old.editable is None and older.editable is None
     assert older.edit_operations == ()
     assert read_only_message(older) == (
-        "This version of CoMapeo Desktop cannot be edited from QGIS. "
-        "Update CoMapeo Desktop."
+        "This version of CoMapeo Desktop does not support editing from QGIS. "
+        "Update CoMapeo Desktop to edit observations."
     )
 
 

@@ -251,8 +251,8 @@ def read_only_message(definition: LayerDefinition | None) -> str:
         return "Editing needs CoMapeo Desktop to be connected."
     if definition.editable is None:
         return (
-            "This version of CoMapeo Desktop cannot be edited from QGIS. "
-            "Update CoMapeo Desktop."
+            "This version of CoMapeo Desktop does not support editing from QGIS. "
+            "Update CoMapeo Desktop to edit observations."
         )
     reason = definition.read_only_reason
     if reason == "disabled":

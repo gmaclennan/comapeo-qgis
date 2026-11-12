@@ -104,6 +104,8 @@ class ProjectStatus:
     locked: bool = False
     # Titles of the layers whose live updates wait for an edit session.
     paused_layers: tuple[str, ...] = ()
+    # Why the app lets none of the project's editable layers be edited.
+    read_only: str | None = None
 
     @property
     def incomplete(self) -> bool:
@@ -152,9 +154,8 @@ class ProjectStatus:
             if len(self.paused_layers) == 1:
                 return PAUSED_TEXT.replace("this layer", self.paused_layers[0])
             return "Live updates are paused for layers with unsaved edits."
-        if self.busy:
-            return "Updating…"
-        return f"Up to date (last updated {when})."
+        text = "Updating…" if self.busy else f"Up to date (last updated {when})."
+        return f"{text} {self.read_only}" if self.read_only else text
 
     def _cached(self) -> str:
         if not self.incomplete:
@@ -441,7 +442,17 @@ class Controller(QObject):
                 for info in tables
                 if sync is not None and sync.held(info.layer_id)
             ),
+            read_only=self._read_only(project_id, tables) if sync else None,
         )
+
+    def _read_only(self, project_id: str, tables: list[TableInfo]) -> str | None:
+        for info in tables:
+            live = self.live_definition(project_id, info.layer_id)
+            if live is None or live.editable is True:
+                continue
+            if live.read_only_reason != "unsupported":
+                return read_only_message(live)
+        return None
 
     def cache(self, project_id: str) -> ProjectCache:
         cache = self._caches.get(project_id)
@@ -535,6 +546,15 @@ class Controller(QObject):
             return False, TRANSACTION_TEXT, live
         return True, None, live
 
+    def read_only_reason(self, layer: QgsMapLayer) -> str | None:
+        """Why a map layer cannot be edited while its app is connected."""
+        ids = self._resolved_ids(layer)
+        sync = self._syncs.get(ids[0]) if ids is not None else None
+        if sync is None or not sync.connected:
+            return None
+        allowed, message, live = self.edit_state(layer)
+        return None if allowed or live is None else message
+
     def update_editing(self, layer: QgsVectorLayer, force: bool = False) -> None:
         """Lock or unlock the layer and its columns for the current state."""
         ids = self._resolved_ids(layer)
@@ -577,6 +597,7 @@ class Controller(QObject):
     def _set_catalog(self, project_id: str, layers: Any, categories: Any) -> None:
         self._catalog[project_id] = (layers, categories)
         self._refresh_editing(project_id)
+        self.changed.emit()
 
     def cached_attachments(
         self, project_id: str, layer_id: str, doc_id: str
@@ -886,7 +907,6 @@ class Controller(QObject):
                 replies[name] = result
                 if len(replies) == 2:
                     self._set_catalog(project_id, replies["layers"], replies["cats"])
-                    self.changed.emit()
 
             return callback
 

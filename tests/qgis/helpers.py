@@ -203,3 +203,21 @@ def table_view(layer, iface):
     QTimer.singleShot(200, loop.quit)
     loop.exec()
     return view
+
+
+def badges(iface, layer: QgsVectorLayer) -> list[str]:
+    """Tooltips of the badges beside a layer in the Layers panel."""
+    node = QgsProject.instance().layerTreeRoot().findLayer(layer.id())
+    if node is None:
+        return []
+    return [i.toolTip() for i in iface.layerTreeView().indicators(node)]
+
+
+def panel_row(plugin, project_id: str) -> str:
+    """The status a project's row shows in the CoMapeo panel."""
+    projects = plugin.dock.projects
+    for i in range(projects.topLevelItemCount()):
+        item = projects.topLevelItem(i)
+        if item.data(0, Qt.ItemDataRole.UserRole) == project_id:
+            return item.text(1)
+    return ""

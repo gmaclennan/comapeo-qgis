@@ -1,10 +1,11 @@
-"""Layer tree badges on CoMapeo layers that show cached, not live, data."""
+"""Layer tree badges on CoMapeo layers that show cached, not live, data, or that
+cannot be edited."""
 
 from __future__ import annotations
 
 import contextlib
 
-from qgis.core import QgsApplication, QgsLayerTreeLayer
+from qgis.core import QgsApplication, QgsLayerTreeLayer, QgsMapLayer
 from qgis.gui import QgsLayerTreeView, QgsLayerTreeViewIndicator
 from qgis.PyQt.QtCore import QObject, QTimer
 
@@ -18,6 +19,7 @@ class StaleIndicators(QObject):
         self.view = view
         self.controller = controller
         self._indicators: dict[tuple[str, str], QgsLayerTreeViewIndicator] = {}
+        self._locks: dict[str, QgsLayerTreeViewIndicator] = {}
         self._timer = QTimer(self)
         self._timer.setSingleShot(True)
         self._timer.setInterval(0)
@@ -42,7 +44,10 @@ class StaleIndicators(QObject):
         # One indicator per CoMapeo layer: layers of a project can differ in
         # whether their first download finished.
         wanted: dict[tuple[str, str], str] = {}
-        for node in self._root.findLayers():
+        nodes = self._root.findLayers()
+        for layer_id in set(self._locks) - {node.layerId() for node in nodes}:
+            del self._locks[layer_id]
+        for node in nodes:
             layer = node.layer()
             ids = comapeo_ids(layer) if layer is not None else None
             key = (ids[0], ids[1]) if ids else None
@@ -58,6 +63,7 @@ class StaleIndicators(QObject):
                 indicator.setToolTip(tooltip)
                 if indicator not in self.view.indicators(node):
                     self.view.addIndicator(node, indicator)
+            self._update_lock(node, layer if key is not None else None)
 
     def clear(self) -> None:
         self._timer.stop()
@@ -66,9 +72,27 @@ class StaleIndicators(QObject):
         with contextlib.suppress(TypeError, RuntimeError):
             self._root.addedChildren.disconnect(self._timer.start)
         for node in self._root.findLayers():
-            for indicator in self._indicators.values():
+            for indicator in (*self._indicators.values(), *self._locks.values()):
                 self._remove(node, indicator)
         self._indicators.clear()
+        self._locks.clear()
+
+    def _update_lock(self, node: QgsLayerTreeLayer, layer: QgsMapLayer | None) -> None:
+        # Toggle Editing is greyed out on a read-only layer, so this is the only
+        # place the user can read why.
+        reason = self.controller.read_only_reason(layer) if layer else None
+        indicator = self._locks.get(node.layerId())
+        if not reason:
+            if indicator is not None:
+                self._remove(node, indicator)
+            return
+        if indicator is None:
+            indicator = QgsLayerTreeViewIndicator(self)
+            indicator.setIcon(QgsApplication.getThemeIcon("/locked.svg"))
+            self._locks[node.layerId()] = indicator
+        indicator.setToolTip(reason)
+        if indicator not in self.view.indicators(node):
+            self.view.addIndicator(node, indicator)
 
     def _indicator(self, key: tuple[str, str]) -> QgsLayerTreeViewIndicator:
         indicator = self._indicators.get(key)
