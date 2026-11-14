@@ -4,7 +4,7 @@ Agreed 11 Nov 2026. Background and evidence are in `docs/research/`.
 
 ## Goal
 
-A QGIS plugin that shows the observations and tracks of a CoMapeo project as layers over the user's own QGIS map, with category icons and viewable photos and audio. It connects to CoMapeo Desktop running on the same computer. Editing follows as a second phase.
+A QGIS plugin that shows the observations and tracks of a CoMapeo project as layers over the user's own QGIS map, with category icons and viewable photos and audio. It connects to CoMapeo Desktop running on the same computer. The first release is read-only; editing was built as a second phase and is parked on the `parked/editing` branch.
 
 ## Scope
 
@@ -21,6 +21,8 @@ A QGIS plugin that shows the observations and tracks of a CoMapeo project as lay
 - Published on plugins.qgis.org under GPL-2.0-or-later.
 
 ### Phase 2 (editing)
+
+Built, then taken out of the first release as too much complexity and risk for now; the work is on the `parked/editing` branch. The local API keeps its editing support, off by default, and CoMapeo Desktop will not offer the setting for the first release. What it covered:
 
 - Change field values and notes, change category, move a point, delete an observation. This matches what desktop's own UI allows.
 - The role rule (members edit only their own observations) is enforced by the local API, not the plugin.
@@ -88,7 +90,7 @@ Three tiers, kept separate so most logic is testable without QGIS:
 Data handling:
 
 - Cache: one GeoPackage per CoMapeo project in the QGIS profile folder, shared by every QGIS project that uses it. Not beside the `.qgz`, so sending someone a project file does not hand over the data.
-- Layers are flagged read-only in version 1.
+- Layers are read-only, whatever the server says may be edited.
 - Built-in columns in plain snake_case: id, category, created and updated time, created-by and updated-by device names, GPS accuracy, altitude, photo and audio counts. A `comapeo_` prefix only where a tag key collides. Field columns are named by tag key and are not translated; display values and labels follow the QGIS interface language where CoMapeo has a translation.
 - Multi-value fields are list columns. When categories change, the layer schema is rebuilt on refresh.
 - Tracks: one line per track with start time, end time and category; per-point timestamps as the geometry's M value.
@@ -115,7 +117,7 @@ Data handling:
 | 4 | Media panel | Selecting an observation shows its photos and plays or opens its audio; unsynced media shows a placeholder. |
 | 5 | Desktop branch | With the setting on in a locally built desktop, the plugin finds and connects to it; Playwright test passes. |
 | 6 | Live updates | A document created or synced in desktop appears in QGIS without pressing refresh. |
-| 7 | Editing (phase 2) | The agreed edits round-trip; a stale save is refused; a member cannot edit another's observation. |
+| 7 | Editing (phase 2) | Built and parked on `parked/editing`, not in the first release. |
 
 ## Risks and open points
 

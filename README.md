@@ -1,6 +1,6 @@
 # CoMapeo for QGIS
 
-A QGIS plugin that shows the observations and tracks of a CoMapeo project as layers, with category icons, photos and audio. It connects to CoMapeo Desktop running on the same computer through the CoMapeo local API. Version 1 is view-only.
+A QGIS plugin that shows the observations and tracks of a CoMapeo project as layers, with category icons, photos and audio. It connects to CoMapeo Desktop running on the same computer through the CoMapeo local API. Version 1 is view-only: the layers cannot be edited, even when the app would allow it. Editing from QGIS was built and then set aside for a later release; that work is kept on the `parked/editing` branch.
 
 Status: early development. Observations and tracks show as read-only layers with category icons, kept in a local cache and updated live. Selecting one observation shows its photos and audio in the CoMapeo panel. Scope and design are in [docs/PLAN.md](docs/PLAN.md). The wire contract is `docs/PROTOCOL.md` in the `comapeo-local-api` repository.
 
@@ -35,7 +35,7 @@ cd ../comapeo-local-api && fnm exec --using=24 npm run dev -- --discovery-dir /t
 # into the profile's python/plugins as comapeo_qgis
 ```
 
-Type `create`, `update`, `delete` or `category` into the dev server to see live updates.
+Type `create`, `update`, `delete` or `category` into the dev server to see live updates. `--allow-edits` makes the dev server offer editing; the plugin ignores that and stays read-only, which `tests/qgis/test_read_only_with_edits_allowed.py` checks.
 
 `scripts/smoke-e2e.sh --media` checks the photo and audio panel in a real QGIS window the same way, with screenshots prefixed `media-`.
 

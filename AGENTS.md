@@ -2,6 +2,8 @@
 
 QGIS plugin ("CoMapeo") that shows CoMapeo project data as QGIS layers by talking to CoMapeo Desktop over the local API. Design: `docs/PLAN.md`. Wire contract: `../comapeo-local-api/docs/PROTOCOL.md`, which is the source of truth; never code against behaviour it does not state.
 
+The plugin is read-only. Editing (QGIS edit sessions sent as `features.update`/`features.delete`) is parked on the `parked/editing` branch; the editing methods and flags in PROTOCOL.md are ignored here, and layers stay read-only whatever the server allows.
+
 ## Commands
 
 | Task | Command |
@@ -19,7 +21,7 @@ QGIS plugin ("CoMapeo") that shows CoMapeo project data as QGIS layers by talkin
 
 Everything must pass in `.venv` and under `scripts/qgis-python.sh` before you finish.
 
-CI (`.github/workflows/test.yml`) adds QGIS 3.44 and 4.x in the `qgis/qgis` Docker images and in OSGeo4W on Windows, against a pinned `comapeo-local-api` commit (`LOCAL_API_SHA`). There `COMAPEO_REQUIRE_SERVER=1` turns a skipped `real_server` test into a failure and `COMAPEO_REQUIRE_QGIS=1` stops `tests/qgis/` being left out; `COMAPEO_EXPECT_QGIS=3/5` checks the QGIS and Qt majors. To reproduce the 3.44 job on a Mac, run the `qgis/qgis:ltr` image (amd64) with Node 24 and an `npm ci`'d copy of the server mounted in. OSGeo4W's `python-qgis*.bat` resets `PATH` and `PYTHONPATH`, so `COMAPEO_NODE` names Node there.
+CI (`.github/workflows/test.yml`) adds QGIS 3.44 and 4.x in the `qgis/qgis` Docker images and in OSGeo4W on Windows, against a pinned `comapeo-local-api` commit (`LOCAL_API_SHA`), one that can serve edits when started with `--allow-edits`. There `COMAPEO_REQUIRE_SERVER=1` turns a skipped `real_server` test into a failure and `COMAPEO_REQUIRE_QGIS=1` stops `tests/qgis/` being left out; `COMAPEO_EXPECT_QGIS=3/5` checks the QGIS and Qt majors. To reproduce the 3.44 job on a Mac, run the `qgis/qgis:ltr` image (amd64) with Node 24 and an `npm ci`'d copy of the server mounted in. OSGeo4W's `python-qgis*.bat` resets `PATH` and `PYTHONPATH`, so `COMAPEO_NODE` names Node there.
 
 ## Layout
 
@@ -51,6 +53,7 @@ tests/                 plain pytest; fake_server.py implements PROTOCOL.md over 
                        with test hooks: fail_next() injects an error reply, stuck_cursor repeats a cursor
   winpipe.py           Windows named pipes for the fake server and driver
   dev_server.py        starts `node src/dev/cli.ts` in ../comapeo-local-api for tests
+                       (`allow_edits` for the check that layers stay read-only)
   test_real_server.py  runs the core against that dev server; skips when the checkout,
                        its node_modules or Node 22.18+ is missing
   media_server.py      a real HTTP server on 127.0.0.1 for media cases the dev server
@@ -82,6 +85,7 @@ scripts/desktop-smoke.mjs  the same against a packaged CoMapeo Desktop (Playwrig
 - Cache tables carry private columns (document id, version, category id, attachments) whose names are chosen per table against the server's column names, case-insensitively, because SQLite compares names that way and any tag key may arrive (`fid`, `geom` included). The renderer keys on the category id column, never the translated category name.
 - A map layer is CoMapeo's only when it is an `ogr` layer on a file named after its project id (`cache.cache_file_name`) and carries the `comapeo/projectId` and `comapeo/layerId` custom properties (`layers.comapeo_ids`). The properties alone are not enough: Copy/Paste Style or a QML file copies them onto any layer. In plugin code, decide ownership through `comapeo_ids`/`comapeo_layers`, never by reading the properties directly. Within a project the table wins over `comapeo/layerId` (a style pasted between two CoMapeo layers brings the other's id): the controller's `_resolved_ids` corrects the property from the table the layer is on.
 - A schema change creates a new table (`<layer>_<hash of layer id and schema key>`), staged (`staged:<id>` in `comapeo_meta`) while map layers stay on the old one. Only after the full fetch succeeds is it committed, map layers switched with `setDataSource` (carrying the user's `subsetString` across) and the old table dropped; a failed fetch leaves the old table and its refresh time. Saved QGIS projects that still point at a dropped table are re-pointed on load from the layers' `comapeo/projectId` and `comapeo/layerId` custom properties. `Controller.ensure_table` returns any stored table as it is and leaves rebuilds to the sync.
+- Caches and saved projects from the editing plugin (`parked/editing`): its schema keys carry a cache format, so its tables are rebuilt once on connect, and they hold two more private columns (`forks`, `editable`). `configure` therefore hides every private column a table records, not a fixed list, and removes what an editable layer was saved with: the grey-row style and a hidden built-in column. Offline such a table shows as it is. `tests/qgis/test_cache_from_editing_plugin.py` covers both.
 - GeoPackage has no list type: `string_list` columns are stored as JSON; QGIS 4.0 and 4.2 read them back as a `QStringList` field of subtype JSON, and 3.44 gives the same values.
 - After writing through the cache's own provider, map layers on the same table need `reload()`; `featureCount()` is stale until then.
 - The OGR provider does not convert geometry dimensions: write Point 2D and LineStringM (NaN where a time is missing) to match the table.
