@@ -10,6 +10,7 @@ import os
 import shutil
 import sqlite3
 import zipfile
+from contextlib import closing
 
 import pytest
 from qgis.core import (
@@ -64,7 +65,7 @@ def leave_as_the_editing_plugin_did(layer) -> None:
 
 
 def add_newer_columns(path: str) -> tuple[str, str]:
-    with sqlite3.connect(path) as conn:
+    with closing(sqlite3.connect(path)) as conn, conn:
         [(value,)] = conn.execute(
             "SELECT value FROM comapeo_meta WHERE key = 'layer:observations'"
         ).fetchall()
@@ -82,7 +83,7 @@ def add_newer_columns(path: str) -> tuple[str, str]:
     info["private"].update(forks="comapeo_forks", editable="comapeo_editable")
     key = json.loads(info["schemaKey"])
     info["schemaKey"] = json.dumps([*key[:3], "f:2", *key[3:]])
-    with sqlite3.connect(path) as conn:
+    with closing(sqlite3.connect(path)) as conn, conn:
         conn.execute(
             "UPDATE comapeo_meta SET value = ? WHERE key = 'layer:observations'",
             (json.dumps(info),),
@@ -183,7 +184,7 @@ def test_online_the_old_cache_is_rebuilt_once(iface, fake, project_file):
         assert values(layer) == before
         assert_read_only_and_clean(layer, visible)
         [path] = cache_root().glob("*.gpkg")
-        with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as conn:
+        with closing(sqlite3.connect(f"file:{path}?mode=ro", uri=True)) as conn:
             names = {r[0] for r in conn.execute("SELECT table_name FROM gpkg_contents")}
         assert table not in names
     finally:
