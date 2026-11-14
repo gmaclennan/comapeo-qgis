@@ -146,7 +146,7 @@ def test_version_mismatch_says_which_side_to_update(
 def test_unknown_method_and_project_errors(server):
     client = connect(server)
     with pytest.raises(RemoteError) as info:
-        client.call("features.update", {})
+        client.call("features.create", {})
     assert info.value.code == "METHOD_NOT_FOUND"
     with pytest.raises(RemoteError) as info:
         client.call("layers.list", {"projectId": "nope"})
