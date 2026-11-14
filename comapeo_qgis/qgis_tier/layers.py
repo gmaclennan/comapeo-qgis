@@ -21,7 +21,9 @@ PROP_PROJECT = "comapeo/projectId"
 PROP_LAYER = "comapeo/layerId"
 GROUP_PROP_PROJECT = "comapeo/projectId"
 
-PRIVATE_ROLES = ("doc_id", "version", "category_id", "attachments")
+_KEPT = ("fid", "geometry")
+# Left on saved layers by the editing plugin now on the parked/editing branch.
+EDITING_ROW_STYLE = "CoMapeo: created on another device"
 
 
 def comapeo_ids(layer: QgsMapLayer) -> tuple[str, str] | None:
@@ -64,28 +66,41 @@ def configure(layer: QgsVectorLayer, project_id: str, info: TableInfo) -> None:
     layer.setCustomProperty(PROP_LAYER, info.layer_id)
     layer.setReadOnly(True)
     fields = layer.fields()
+    # The plugin never hides a served column; the editing plugin hid one.
+    shown = set()
     for column in info.definition.columns:
         index = fields.indexOf(column.name)
         if index >= 0:
             layer.setFieldAlias(index, column.label)
+            kind = layer.editorWidgetSetup(index).type()
+            if kind == "Hidden":
+                shown.add(column.name)
             setup = _value_labels(column)
             if setup is not None:
                 layer.setEditorWidgetSetup(index, setup)
-            elif layer.editorWidgetSetup(index).type() == "ValueMap":
+            elif kind in ("ValueMap", "Hidden"):
                 layer.setEditorWidgetSetup(index, QgsEditorWidgetSetup())
-    hidden = {info.field(role) for role in PRIVATE_ROLES}
+    # Every private column the table records, including any a newer plugin added.
+    hidden = {name for role, name in info.private.items() if role not in _KEPT}
     config = layer.attributeTableConfig()
     config.update(fields)
     columns = config.columns()
     for column in columns:
         if column.name in hidden:
             column.hidden = True
+        elif column.name in shown:
+            column.hidden = False
     config.setColumns(columns)
     layer.setAttributeTableConfig(config)
     for name in hidden:
         index = fields.indexOf(name)
         if index >= 0:
             layer.setEditorWidgetSetup(index, QgsEditorWidgetSetup("Hidden", {}))
+    styles = layer.conditionalStyles()
+    rows = styles.rowStyles()
+    kept = [s for s in rows if s.name() != EDITING_ROW_STYLE]
+    if len(kept) != len(rows):
+        styles.setRowStyles(kept)
 
 
 def _value_labels(column: ColumnSpec) -> QgsEditorWidgetSetup | None:
