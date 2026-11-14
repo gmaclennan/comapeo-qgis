@@ -65,6 +65,7 @@ class DevServer:
         photos: int = 4,
         projects: int = 1,
         discovery_dir: str | None = None,
+        allow_edits: bool = False,
     ) -> None:
         self._owns_discovery_dir = discovery_dir is None
         self.discovery_dir = discovery_dir or short_tempdir()
@@ -84,6 +85,7 @@ class DevServer:
                 str(photos),
                 "--projects",
                 str(projects),
+                *(["--allow-edits"] if allow_edits else []),
             ],
             cwd=SERVER_DIR,
             stdin=subprocess.PIPE,
