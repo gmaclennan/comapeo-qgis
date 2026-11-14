@@ -32,8 +32,7 @@ class ReconcileError(Exception):
 class Reconciler:
     """Diff one fetch (all its pages) against the cache.
 
-    `cached` maps feature id to the revision stored (`model.revision`: the
-    version, and the forks when there are any). Without `ids` this is a
+    `cached` maps feature id to the version stored. Without `ids` this is a
     full fetch: ids absent from every page are deleted, but only by `finish()`,
     once the last page has arrived. With `ids` (a change notification) only
     those ids are touched. Apply each returned plan in order. If the server
@@ -82,13 +81,13 @@ class Reconciler:
             self._seen.add(feature.id)
             if (
                 not self._refresh_all
-                and self._cached.get(feature.id) == feature.revision
+                and self._cached.get(feature.id) == feature.version
             ):
                 if feature.id not in upserts:
                     unchanged += 1
                 continue
             upserts[feature.id] = feature
-            self._cached[feature.id] = feature.revision
+            self._cached[feature.id] = feature.version
         deletes = []
         if self._requested is not None:
             for removed in page.removed:
@@ -147,11 +146,6 @@ def reconcile(
     )
 
 
-# Part of every schema key: a cache written by an older plugin, without the
-# private columns for forks and the per-feature edit flag, is rebuilt once.
-CACHE_FORMAT = "f:2"
-
-
 def layer_schema_key(
     layer: LayerDefinition,
     lang: str | None,
@@ -169,7 +163,7 @@ def layer_schema_key(
     else:
         columns = [[c.name, c.type, c.role] for c in layer.columns]
         schema = f"c:{_digest(columns)}"
-    key: list[str] = [schema, layer.geometry_type, lang or "", CACHE_FORMAT]
+    key: list[str] = [schema, layer.geometry_type, lang or ""]
     if categories is not None:
         key.append(f"k:{categories_digest(categories)}")
     return json.dumps(key)

@@ -10,8 +10,8 @@ permissions:
   contents: read
 
 env:
-  # gmaclennan/comapeo-local-api feat/editing (its PR #3, not merged yet); bump
-  # to test against a newer server.
+  # gmaclennan/comapeo-local-api main, which can serve edits when told to; the
+  # plugin must stay read-only against it. Bump to test against a newer server.
   LOCAL_API_SHA: 4a2854388a4479bb0775866c1c18b96ccf229389
   QT_QPA_PLATFORM: offscreen
   PYTHONDONTWRITEBYTECODE: '1'
