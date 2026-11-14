@@ -18,8 +18,6 @@ from qgis.core import (
     QgsVariantUtils,
     QgsVectorLayer,
 )
-from qgis.gui import QgsDualView
-from qgis.PyQt.QtCore import QEventLoop, Qt, QTimer
 from qgis.PyQt.QtNetwork import QLocalSocket
 
 from comapeo_qgis.core.discovery import find_servers
@@ -175,49 +173,3 @@ def symbol_for(layer: QgsVectorLayer, feature: QgsFeature) -> Any:
         return None if symbol is None else symbol.clone()
     finally:
         renderer.stopRender(context)
-
-
-def grey_rows(view):
-    """Ids of the rows the attribute table shows in the "not editable" grey."""
-    model = view.masterModel()
-    header = Qt.Orientation.Horizontal
-    names = [
-        model.headerData(c, header, Qt.ItemDataRole.DisplayRole)
-        for c in range(model.columnCount())
-    ]
-    id_column, notes = names.index("ID"), names.index("Notes")
-    grey = set()
-    for row in range(model.rowCount()):
-        doc_id = model.data(model.index(row, id_column), Qt.ItemDataRole.DisplayRole)
-        brush = model.data(model.index(row, notes), Qt.ItemDataRole.ForegroundRole)
-        colour = brush.color() if hasattr(brush, "color") else brush
-        if colour is not None and colour.isValid() and colour.name() == "#8a8a8a":
-            grey.add(doc_id)
-    return grey
-
-
-def table_view(layer, iface):
-    view = QgsDualView()
-    view.init(layer, iface.mapCanvas())
-    loop = QEventLoop()
-    QTimer.singleShot(200, loop.quit)
-    loop.exec()
-    return view
-
-
-def badges(iface, layer: QgsVectorLayer) -> list[str]:
-    """Tooltips of the badges beside a layer in the Layers panel."""
-    node = QgsProject.instance().layerTreeRoot().findLayer(layer.id())
-    if node is None:
-        return []
-    return [i.toolTip() for i in iface.layerTreeView().indicators(node)]
-
-
-def panel_row(plugin, project_id: str) -> str:
-    """The status a project's row shows in the CoMapeo panel."""
-    projects = plugin.dock.projects
-    for i in range(projects.topLevelItemCount()):
-        item = projects.topLevelItem(i)
-        if item.data(0, Qt.ItemDataRole.UserRole) == project_id:
-            return item.text(1)
-    return ""
