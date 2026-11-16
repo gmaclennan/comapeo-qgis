@@ -2,7 +2,7 @@
 
 QGIS plugin ("CoMapeo") that shows CoMapeo project data as QGIS layers by talking to CoMapeo Desktop over the local API. Design: `docs/PLAN.md`. Wire contract: `../comapeo-local-api/docs/PROTOCOL.md`, which is the source of truth; never code against behaviour it does not state.
 
-The plugin is read-only. Editing (QGIS edit sessions sent as `features.update`/`features.delete`) is parked on the `parked/editing` branch; the editing methods and flags in PROTOCOL.md are ignored here, and layers stay read-only whatever the server allows.
+The plugin is read-only. Editing (QGIS edit sessions sent as `features.update`/`features.delete`) is parked on the `parked/editing` branch here and in `comapeo-local-api`; the server on main has no editing methods.
 
 ## Commands
 
@@ -21,7 +21,7 @@ The plugin is read-only. Editing (QGIS edit sessions sent as `features.update`/`
 
 Everything must pass in `.venv` and under `scripts/qgis-python.sh` before you finish.
 
-CI (`.github/workflows/test.yml`) adds QGIS 3.44 and 4.x in the `qgis/qgis` Docker images and in OSGeo4W on Windows, against a pinned `comapeo-local-api` commit (`LOCAL_API_SHA`), one that can serve edits when started with `--allow-edits`. There `COMAPEO_REQUIRE_SERVER=1` turns a skipped `real_server` test into a failure and `COMAPEO_REQUIRE_QGIS=1` stops `tests/qgis/` being left out; `COMAPEO_EXPECT_QGIS=3/5` checks the QGIS and Qt majors. To reproduce the 3.44 job on a Mac, run the `qgis/qgis:ltr` image (amd64) with Node 24 and an `npm ci`'d copy of the server mounted in. OSGeo4W's `python-qgis*.bat` resets `PATH` and `PYTHONPATH`, so `COMAPEO_NODE` names Node there.
+CI (`.github/workflows/test.yml`) adds QGIS 3.44 and 4.x in the `qgis/qgis` Docker images and in OSGeo4W on Windows, against a pinned `comapeo-local-api` commit (`LOCAL_API_SHA`). There `COMAPEO_REQUIRE_SERVER=1` turns a skipped `real_server` test into a failure and `COMAPEO_REQUIRE_QGIS=1` stops `tests/qgis/` being left out; `COMAPEO_EXPECT_QGIS=3/5` checks the QGIS and Qt majors. To reproduce the 3.44 job on a Mac, run the `qgis/qgis:ltr` image (amd64) with Node 24 and an `npm ci`'d copy of the server mounted in. OSGeo4W's `python-qgis*.bat` resets `PATH` and `PYTHONPATH`, so `COMAPEO_NODE` names Node there.
 
 ## Layout
 
@@ -53,7 +53,6 @@ tests/                 plain pytest; fake_server.py implements PROTOCOL.md over 
                        with test hooks: fail_next() injects an error reply, stuck_cursor repeats a cursor
   winpipe.py           Windows named pipes for the fake server and driver
   dev_server.py        starts `node src/dev/cli.ts` in ../comapeo-local-api for tests
-                       (`allow_edits` for the check that layers stay read-only)
   test_real_server.py  runs the core against that dev server; skips when the checkout,
                        its node_modules or Node 22.18+ is missing
   media_server.py      a real HTTP server on 127.0.0.1 for media cases the dev server
