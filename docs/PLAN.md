@@ -22,7 +22,7 @@ A QGIS plugin that shows the observations and tracks of a CoMapeo project as lay
 
 ### Phase 2 (editing)
 
-Built, then taken out of the first release as too much complexity and risk for now; the work is on the `parked/editing` branch. The local API keeps its editing support, off by default, and CoMapeo Desktop will not offer the setting for the first release. What it covered:
+Built, then taken out of the first release as too much complexity and risk for now; the work is on the `parked/editing` branch of this repository and of `comapeo-local-api`, whose main is read-only too. CoMapeo Desktop does not offer the setting. What it covered:
 
 - Change field values and notes, change category, move a point, delete an observation. This matches what desktop's own UI allows.
 - The role rule (members edit only their own observations) is enforced by the local API, not the plugin.
